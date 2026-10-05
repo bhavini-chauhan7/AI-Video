@@ -1,10 +1,13 @@
 """Turns Kokoro speech into singing.
 
-Each syllable is spoken by Kokoro (from IPA phonemes), then the WORLD
-vocoder re-times it to its note length and replaces its pitch with the
-melody note (plus vibrato and a short glide), the way a vocal tuner does.
-Consonants stay natural length and land just before the beat so the vowel
-starts on the beat.
+Default (sing_phrase): every word is spoken naturally by Kokoro, syllable
+boundaries inside a word are found by aligning it with its separately spoken
+syllables, and the words are re-timed onto the notes and re-pitched in one
+WORLD vocoder pass. The steadiest part of each vowel is held, pitch is steady
+with a hint of the speaker's own intonation, and only long notes get a light
+vibrato. Consonants land just before the beat so vowels start on the beat.
+
+Fallback (sing_syllables): each syllable is spoken and tuned on its own.
 """
 import re
 
@@ -203,6 +206,15 @@ def _polish(out, fs, reverb=0.16):
 
 
 def sing(kokoro, notes, bpm, voice, lang="en-us", opts=None):
+    """Sing a line: the natural word-by-word method, or syllable-by-syllable if that fails."""
+    try:
+        return sing_phrase(kokoro, notes, bpm, voice, lang, opts)
+    except Exception as err:  # odd input (e.g. unsplittable syllables): use the simpler method
+        print(f"sing_phrase fell back: {err}", file=__import__("sys").stderr)
+        return sing_syllables(kokoro, notes, bpm, voice, lang, opts)
+
+
+def sing_syllables(kokoro, notes, bpm, voice, lang="en-us", opts=None):
     """notes: [{"text": "Twin", "word": 0, "pitch": 60, "beats": 1}, ...]; pitch 0 or empty text = rest.
     Returns (samples, fs) with note i starting exactly at its beat position."""
     opts = opts or {}
@@ -273,3 +285,279 @@ def sing(kokoro, notes, bpm, voice, lang="en-us", opts=None):
     out = _fade(out, fs, 0.0, 0.08)
     peak = np.max(np.abs(out)) or 1.0
     return (out / peak * 0.89).astype(np.float32), fs
+
+
+# ---------------------------------------------------------------------------
+# Natural-phrase singer (default): Kokoro speaks the whole lyric line once, so
+# sounds blend into each other like real speech. Syllable positions inside that
+# phrase are found by aligning it (DTW) against the separately spoken
+# syllables, then the phrase is re-timed onto the notes and re-pitched in one
+# WORLD pass. No joins, natural transitions, steady pitch with a hint of the
+# speaker's own intonation.
+# ---------------------------------------------------------------------------
+
+def _logmel(x, fs, hop, n_mels=30):
+    win, nfft = int(0.025 * fs), 512
+    if len(x) < win:
+        x = np.pad(x, (0, win - len(x)))
+    frames = 1 + (len(x) - win) // hop
+    idx = np.arange(win)[None, :] + hop * np.arange(frames)[:, None]
+    spec = np.abs(np.fft.rfft(x[idx] * np.hanning(win), nfft)) ** 2
+    mel = lambda f: 2595 * np.log10(1 + f / 700)
+    pts = 700 * (10 ** (np.linspace(mel(80), mel(fs / 2 * 0.9), n_mels + 2) / 2595) - 1)
+    bins = np.floor((nfft + 1) * pts / fs).astype(int)
+    fb = np.zeros((n_mels, nfft // 2 + 1))
+    for m in range(1, n_mels + 1):
+        a, b, c = bins[m - 1], bins[m], bins[m + 1]
+        if b > a: fb[m - 1, a:b] = (np.arange(a, b) - a) / (b - a)
+        if c > b: fb[m - 1, b:c] = (c - np.arange(b, c)) / (c - b)
+    f = np.log(spec @ fb.T + 1e-10)
+    return (f - f.mean(0)) / (f.std(0) + 1e-6)
+
+
+def _dtw_map(ref, hyp):
+    """Standard DTW. Returns, for every ref frame, the first hyp frame it aligns to."""
+    n, m = len(ref), len(hyp)
+    cost = np.sqrt(((ref[:, None, :] - hyp[None, :, :]) ** 2).sum(-1))
+    D = np.full((n + 1, m + 1), np.inf)
+    D[0, 0] = 0.0
+    for i in range(1, n + 1):
+        ci = cost[i - 1]
+        prev = D[i - 1]
+        row = D[i]
+        # diagonal / vertical candidates are vectorized; the horizontal one is a running scan
+        base = np.minimum(prev[:-1], prev[1:]) + ci
+        acc = np.inf
+        for j in range(1, m + 1):
+            acc = min(base[j - 1], acc + ci[j - 1])
+            row[j] = acc
+    # backtrack
+    i, j = n, m
+    first = np.full(n, m - 1)
+    while i > 0 and j > 0:
+        first[i - 1] = j - 1
+        moves = (D[i - 1, j - 1], D[i - 1, j], D[i, j - 1])
+        k = int(np.argmin(moves))
+        if k == 0: i, j = i - 1, j - 1
+        elif k == 1: i -= 1
+        else: j -= 1
+    return np.minimum.accumulate(first[::-1])[::-1]
+
+
+def _trim(y, fs, db=-38):
+    e = np.abs(y)
+    thr = e.max() * 10 ** (db / 20)
+    on = np.where(e > thr)[0]
+    if len(on) == 0:
+        return y
+    return y[max(0, on[0] - int(0.005 * fs)): on[-1] + int(0.01 * fs)]
+
+
+def sing_phrase(kokoro, notes, bpm, voice, lang="en-us", opts=None):
+    opts = opts or {}
+    fs = 24000
+    hop = int(FRAME_MS / 1000 * fs)
+    spb = 60.0 / bpm
+    transpose = opts.get("transpose", 0)
+
+    # 1) syllables -> phonemes, grouped into "events" (a syllable plus any held notes)
+    words = {}
+    for i, nt in enumerate(notes):
+        if nt.get("text") and nt.get("pitch") and not nt.get("hold"):
+            words.setdefault(nt.get("word", i), []).append(i)
+    clean = lambda ipa: re.sub(r"[.,!?;:\"“”()]", "", ipa).replace(" ", "")
+    syl_ipa, word_ipa = {}, []
+    for _, idxs in sorted(words.items()):
+        texts = [re.sub(r"[^\w']", "", notes[i]["text"]) for i in idxs]
+        chunks = split_syllables(clean(kokoro.tokenizer.phonemize("".join(texts), lang=lang)), len(idxs))
+        if None in chunks:
+            chunks = [clean(kokoro.tokenizer.phonemize(t, lang=lang)) or None for t in texts]
+        if None in chunks:
+            raise ValueError("could not split syllables")
+        for i, c in zip(idxs, chunks):
+            syl_ipa[i] = c
+        word_ipa.append("".join(chunks))
+
+    events = []  # {"syl": note index, "notes": [(start_s, dur_s, pitch)]}
+    t = 0.0
+    for i, nt in enumerate(notes):
+        dur = float(nt["beats"]) * spb
+        if nt.get("pitch") and nt.get("text"):
+            if nt.get("hold") and events and abs(events[-1]["notes"][-1][0] + events[-1]["notes"][-1][1] - t) < 1e-6:
+                events[-1]["notes"].append((t, dur, nt["pitch"] + transpose))
+            elif i in syl_ipa:
+                events.append({"syl": i, "notes": [(t, dur, nt["pitch"] + transpose)]})
+        t += dur
+    total = t
+    if not events:
+        return np.zeros(int(total * fs), np.float32), fs
+
+    # 2) each word spoken naturally on its own; syllable boundaries inside a
+    #    multi-syllable word come from aligning it with its separately spoken syllables
+    say = lambda ipa: _trim(kokoro.create(ipa, voice=voice, speed=0.92, lang=lang, is_phonemes=True)[0].astype(np.float64), fs)
+    cache = {}
+    def spoken(ipa):
+        if ipa not in cache:
+            cache[ipa] = say(ipa)
+        return cache[ipa]
+
+    ev_of = {ev["syl"]: k for k, ev in enumerate(events)}
+    gap = np.zeros(int(0.03 * fs))
+    parts, seg_bounds, pos = [], [None] * len(events), 0
+    for _, idxs in sorted(words.items()):
+        idxs = [i for i in idxs if i in ev_of]
+        if not idxs:
+            continue
+        w = spoken("".join(syl_ipa[i] for i in idxs))
+        if len(idxs) == 1:
+            cuts = [0, len(w)]
+        else:
+            pieces = [spoken(syl_ipa[i]) for i in idxs]
+            ref = np.concatenate(pieces)
+            starts = np.cumsum([0] + [len(p) for p in pieces[:-1]])
+            path = _dtw_map(_logmel(ref, fs, hop), _logmel(w, fs, hop))
+            cuts = [0] + [int(path[min(len(path) - 1, st // hop)]) * hop for st in starts[1:]] + [len(w)]
+            cuts = list(np.maximum.accumulate(cuts))
+        for j, i in enumerate(idxs):
+            seg_bounds[ev_of[i]] = ((pos + cuts[j]) // hop, (pos + cuts[j + 1]) // hop)
+        parts += [w, gap]; pos += len(w) + len(gap)
+    phrase = np.concatenate(parts) if parts else np.zeros(fs)
+    seg = [b[0] if b else 0 for b in seg_bounds]
+    ends = [b[1] if b else 0 for b in seg_bounds]
+
+    # 3) analyse the words once
+    f0, tt = pw.harvest(phrase, fs, f0_floor=70, f0_ceil=800, frame_period=FRAME_MS)
+    sp = pw.cheaptrick(phrase, f0, tt, fs)
+    ap = pw.d4c(phrase, f0, tt, fs)
+    n = len(f0)
+    energy = sp.sum(1)
+
+    # 4) build the output->source frame map, note by note
+    out_n = int(round(total * 1000 / FRAME_MS)) + 1
+    src = np.full(out_n, -1.0)       # -1 = silence
+    vowel = np.zeros(out_n, bool)
+    gain = np.ones(out_n)
+    f0_target = np.zeros(out_n)
+    lin = lambda p, q, m: np.linspace(p, q, m) if m > 0 else np.array([], dtype=float)
+    fr_of = lambda s: int(round(s * 1000 / FRAME_MS))
+
+    # per-syllable source regions
+    regions = []
+    for k, ev in enumerate(events):
+        a = int(min(seg[k], n - 2)); b = int(max(a + 2, min(ends[k], n)))
+        v = np.where(f0[a:b] > 0)[0]
+        if len(v) >= 2:
+            v0, v1 = a + v[0], a + v[-1] + 1
+        else:  # no voicing found: treat the middle as the vowel
+            v0, v1 = a + (b - a) // 3, a + 2 * (b - a) // 3 + 1
+        # the steady part to hold: grow outward from the loudest frame while it stays loud
+        core = energy[v0:v1]
+        if len(core) >= 2:
+            peak = int(np.argmax(core)); thr = 0.45 * core[peak]
+            l = peak
+            while l > 0 and core[l - 1] >= thr: l -= 1
+            r = peak
+            while r < len(core) - 1 and core[r + 1] >= thr: r += 1
+            s0, s1 = v0 + l, v0 + r + 1
+            if s1 - s0 < 2: s0, s1 = v0, v1
+        else:
+            s0, s1 = v0, v1
+        level = float(np.median(energy[s0:s1]))
+        regions.append(dict(a=a, b=b, v0=v0, v1=v1, s0=s0, s1=s1, level=level))
+    ref_level = float(np.median([r["level"] for r in regions]))
+
+    for k, (ev, r) in enumerate(zip(events, regions)):
+        n_start = fr_of(ev["notes"][0][0])
+        n_end = fr_of(ev["notes"][-1][0] + ev["notes"][-1][1])
+        span = n_end - n_start
+        onset = min(r["v0"] - r["a"], int(140 / FRAME_MS), int(span * 0.35))
+        coda = min(r["b"] - r["v1"], int(120 / FRAME_MS), int(span * 0.25))
+        o0 = max(0, n_start - onset)
+        # next syllable's consonants borrow the end of this note
+        nxt = events[k + 1] if k + 1 < len(events) else None
+        if nxt is not None and abs(fr_of(nxt["notes"][0][0]) - n_end) <= 1:
+            nr = regions[k + 1]
+            nxt_on = min(nr["v0"] - nr["a"], int(140 / FRAME_MS), int((fr_of(nxt["notes"][-1][0] + nxt["notes"][-1][1]) - n_end) * 0.35))
+            v_end = n_end - nxt_on
+        else:
+            v_end = n_end + int(0.03 * 1000 / FRAME_MS)  # ring slightly into a rest
+        v_end = min(v_end, out_n - coda)
+        vs = n_start
+        vlen = max(2, v_end - coda - vs)
+        att, rel = max(1, int(vlen * 0.12)), max(1, int(vlen * 0.12))
+        hold = max(1, vlen - att - rel)
+        vowel_map = np.concatenate([lin(r["v0"], r["s0"], att), lin(r["s0"], max(r["s0"], r["s1"] - 1), hold),
+                                    lin(max(r["s0"], r["s1"] - 1), r["v1"] - 1, rel)])
+        mapping = np.concatenate([lin(r["v0"] - onset, r["v0"] - 1, n_start - o0), vowel_map, lin(r["v1"], r["v1"] + coda - 1, coda)])
+        e = min(out_n, o0 + len(mapping))
+        src[o0:e] = mapping[: e - o0]
+        vowel[vs:min(out_n, vs + len(vowel_map))] = True
+        g = (ref_level / max(r["level"], 1e-16)) ** 0.85
+        gain[o0:e] = min(6.0, max(0.25, g))
+        for (ns, nd, p) in ev["notes"]:
+            f0_target[fr_of(ns):min(out_n, fr_of(ns + nd) + 1)] = midi_hz(p)
+        f0_target[o0:fr_of(ev["notes"][0][0])] = midi_hz(ev["notes"][0][2])
+        # sustain the target through the coda region
+        f0_target[min(out_n - 1, fr_of(ev["notes"][-1][0] + ev["notes"][-1][1])):e] = midi_hz(ev["notes"][-1][2])
+
+    # 5) warp the phrase's envelopes onto the output timeline
+    active = src >= 0
+    s_clip = np.clip(src, 0, n - 1)
+    lo = np.floor(s_clip).astype(int); hi = np.minimum(lo + 1, n - 1); w = (s_clip - lo)[:, None]
+    logsp = np.log(sp + 1e-16)
+    sp2 = np.exp(logsp[lo] * (1 - w) + logsp[hi] * w)
+    ap2 = ap[lo] * (1 - w) + ap[hi] * w
+    vo = (f0[lo] > 0) | (f0[hi] > 0) | vowel
+    # light smoothing everywhere, more on held vowels
+    sp2 = np.exp(_smooth(np.log(sp2), 1))
+    if vowel.any():
+        vi = np.where(vowel)[0]
+        sp2[vi] = np.exp(_smooth(np.log(sp2[vi]), 3))
+    ap2 = np.clip(_smooth(ap2, 3), 0.0, 0.85)
+    bins = ap2.shape[1]
+    freqs = np.arange(bins) * (fs / 2) / (bins - 1)
+    low_cap = np.interp(freqs, [0, 1000, 3000, fs / 2], [0.2, 0.3, 0.85, 0.85])
+    ap2[vowel] = np.minimum(ap2[vowel], low_cap)
+    # even loudness across syllables (spoken stress varies a lot)
+    sp2 *= _smooth(gain[:, None], 4)
+    silent = ~active
+    sp2[silent] = 1e-16; ap2[silent] = 1.0; vo[silent] = False
+
+    # 6) pitch: note targets with eased transitions, a hint of the speaker's own
+    #    intonation, and (optionally) a very light vibrato on long notes
+    tgt_semi = np.where(f0_target > 0, 12 * np.log2(np.maximum(f0_target, 1) / 440), np.nan)
+    idx = np.arange(out_n)
+    good = ~np.isnan(tgt_semi)
+    if good.any():
+        tgt_semi = np.interp(idx, idx[good], tgt_semi[good])
+    tgt_semi = _smooth(tgt_semi[:, None], 6)[:, 0]  # ~60 ms eased glides
+    orig = f0[lo]
+    on = orig > 0
+    human = np.zeros(out_n)
+    if on.sum() > 10:
+        osemi = 12 * np.log2(np.where(on, orig, np.median(orig[on])) / np.median(orig[on]))
+        trend = _smooth(osemi[:, None], 25)[:, 0]
+        human = np.clip(_smooth((osemi - trend)[:, None], 3)[:, 0], -1, 1) * 0.15
+    vib = np.zeros(out_n)
+    if opts.get("vibrato", 1) > 0:
+        for ev in events:
+            for (ns, nd, _p) in ev["notes"]:
+                if nd >= 0.9:
+                    a0, a1 = fr_of(ns), min(out_n, fr_of(ns + nd))
+                    tl = np.arange(a1 - a0) * FRAME_MS / 1000
+                    vib[a0:a1] = 0.1 * opts.get("vibrato", 1) * np.clip((tl - 0.45) / 0.4, 0, 1) * np.sin(2 * np.pi * 5.0 * tl)
+    f0_new = np.where(vo, 440 * 2 ** ((tgt_semi + human + vib) / 12), 0.0)
+    if isinstance(opts.get("debug"), dict):
+        opts["debug"].update(src=src, f0_new=f0_new, vowel=vowel, seg=seg, ends=ends, regions=regions, vo=vo, energy=sp2.sum(1))
+
+    kf = opts.get("formant", 1.0)
+    if abs(kf - 1.0) > 1e-3:
+        srcb = np.clip(np.arange(bins) / kf, 0, bins - 1)
+        sp2 = np.stack([np.interp(srcb, np.arange(bins), row) for row in sp2])
+        ap2 = np.stack([np.interp(srcb, np.arange(bins), row) for row in ap2])
+
+    y = pw.synthesize(np.ascontiguousarray(f0_new), np.ascontiguousarray(sp2), np.ascontiguousarray(ap2), fs, FRAME_MS)
+    y = _polish(y[: int(total * fs) + int(0.6 * fs)], fs, reverb=opts.get("reverb", 0.12))[: int(total * fs)]
+    y = _fade(y, fs, 0.0, 0.04)
+    peak = np.max(np.abs(y)) or 1.0
+    return (y / peak * 0.89).astype(np.float32), fs
