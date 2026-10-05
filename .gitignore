@@ -3,3 +3,4 @@ node_modules/
 uploads/
 *.log
 models/
+__pycache__/
