@@ -26,6 +26,13 @@
     <section class="panel create">
       <h2>1. Describe your video</h2>
       <form id="promptForm">
+        <div class="vtype" id="videoType" role="radiogroup" aria-label="What kind of video?">
+          <button type="button" data-t="talk" class="on">🗣 Talking video</button>
+          <button type="button" data-t="song">🎵 Song / nursery rhyme</button>
+        </div>
+        <label id="songPickLabel" hidden>Song
+          <select id="songPick"><option value="custom">✨ New original song (written by AI)</option></select>
+        </label>
         <div class="audience" id="audience" role="radiogroup" aria-label="Who is the video for?">
           <button type="button" data-a="little-kids">🧸 Little kids<small>3–6</small></button>
           <button type="button" data-a="kids">🚀 Kids<small>7–12</small></button>
@@ -33,7 +40,7 @@
           <button type="button" data-a="young-adults">⚡ Gen Z<small>18–25</small></button>
           <button type="button" data-a="general" class="on">🌍 Everyone<small>all ages</small></button>
         </div>
-        <textarea id="prompt" rows="5" placeholder="e.g. A 30-second promo for a neighborhood coffee shop that roasts its own beans and opens at 6am" required></textarea>
+        <textarea id="prompt" rows="5" placeholder="e.g. A 30-second promo for a neighborhood coffee shop that roasts its own beans and opens at 6am"></textarea>
         <div class="chips" id="examples"></div>
         <div class="row">
           <label>Length
@@ -59,6 +66,20 @@
         <button type="submit" class="primary" id="generateBtn">✨ Generate storyboard</button>
         <p class="notice" id="notice" hidden></p>
       </form>
+
+      <div id="songPanel" hidden>
+        <h2>Song</h2>
+        <label>Tempo <span class="hint" id="bpmLabel"></span><input type="range" id="bpm" min="60" max="160" step="2"></label>
+        <label>Key <span class="hint" id="keyLabel"></span><input type="range" id="transpose" min="-7" max="7" step="1"></label>
+        <label>Singing engine
+          <select id="songEngine">
+            <option value="builtin">Built-in singer (free, follows the melody)</option>
+            <option value="elevenlabs">ElevenLabs Music (studio quality, paid)</option>
+          </select>
+        </label>
+        <button type="button" class="ghost small" id="songTrackBtn" hidden>🎵 Compose the song with ElevenLabs</button>
+        <p class="hint" id="songHint"></p>
+      </div>
 
       <h2>Voices & cast</h2>
       <p class="hint" id="ttsHint"></p>
@@ -155,9 +176,14 @@
         <label class="wide">Heading <input data-f="heading"></label>
         <label class="wide">Subtext <input data-f="subtext"></label>
         <label class="wide" data-show="bullets">Bullets (one per line) <textarea data-f="bullets" rows="3"></textarea></label>
-        <label class="wide">Narration / voice-over <textarea data-f="narration" rows="2"></textarea></label>
+        <div class="wide song-fields" data-show="song">
+          <label>Lyrics <span class="hint">(split syllables with hyphens: twin-kle)</span><input data-f="lyrics"></label>
+          <label>Melody <span class="hint">(one note per syllable: C4 E4 G4:2 · R = rest)</span><input data-f="melody" spellcheck="false"></label>
+          <p class="hint melody-warn"></p>
+        </div>
+        <label class="wide" data-show="talk">Narration / voice-over <textarea data-f="narration" rows="2"></textarea></label>
         <div class="wide voice-row">
-          <label>Speaker <select data-f="speaker"></select></label>
+          <label><span class="speaker-label">Speaker</span> <select data-f="speaker"></select></label>
           <span class="vo-status"></span>
           <span class="vo-actions">
             <button type="button" data-act="voGen" title="Generate voice-over">🔊</button>

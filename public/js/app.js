@@ -1,13 +1,16 @@
 import { VideoRenderer } from "./renderer.js";
 import { Soundtrack } from "./audio.js";
+import { buildNotes, totalBeats } from "./song.js";
 
 const OPTIONS = {
-  layout: ["title", "bullets", "quote", "statistic", "closing"],
+  layout: ["title", "bullets", "quote", "statistic", "closing", "lyrics"],
   background: ["gradient", "particles", "waves", "grid", "bokeh", "image"],
   transition: ["fade", "slide", "zoom", "wipe"],
   textAnimation: ["fade", "slide-up", "typewriter", "pop"],
 };
 const EXAMPLES = [
+  ["A happy song about brushing your teeth", "little-kids", "song"],
+  ["A dance song about the colors of the rainbow", "kids", "song"],
   ["Counting from 1 to 10 with friendly farm animals", "little-kids"],
   ["A bedtime story about a little dragon who was scared of the dark", "little-kids"],
   ["Why do we have day and night? Fun science with a robot sidekick", "kids"],
@@ -28,6 +31,8 @@ let storyboard = null;
 let serverStatus = { ai: false, mp4: false, tts: false };
 let catalog = { providers: {}, voices: [], effects: [{ id: "none", label: "None" }], presets: [] };
 let audience = "general";
+let videoType = "talk";
+const KEYS = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
 const buffers = new Map(); // voiceover id -> AudioBuffer
 const busy = new Set(); // scene indexes currently generating
 
@@ -78,6 +83,7 @@ function sanitize(sb) {
     audience: String(sb.audience || "general"),
     language: String(sb.language || "en-us"),
     font: ["modern", "rounded", "bold"].includes(sb.font) ? sb.font : "modern",
+    ...(sb.song ? { song: sanitizeSong(sb.song) } : {}),
     cast,
     scenes: sb.scenes.map((s) => {
       const scene = { ...base, ...s };
@@ -85,7 +91,7 @@ function sanitize(sb) {
       scene.bullets = Array.isArray(scene.bullets) ? scene.bullets.map(String) : [];
       scene.colors = Array.isArray(scene.colors) && scene.colors.length >= 2 ? scene.colors.slice(0, 2) : base.colors;
       scene.duration = Math.min(30, Math.max(1, Number(scene.duration) || 5));
-      for (const k of ["heading", "subtext", "narration", "emoji", "accent", "speaker"]) scene[k] = String(scene[k] ?? "");
+      for (const k of ["heading", "subtext", "narration", "emoji", "accent", "speaker", "lyrics", "melody"]) scene[k] = String(scene[k] ?? "");
       if (!cast.some((c) => c.name === scene.speaker)) scene.speaker = cast[0].name;
       const vo = scene.voiceover;
       if (vo && typeof vo.audio === "string" && vo.audio.startsWith("data:audio/")) {
@@ -96,12 +102,118 @@ function sanitize(sb) {
   };
 }
 
+function sanitizeSong(song) {
+  const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Number.isFinite(Number(v)) ? Number(v) : d));
+  const out = {
+    id: String(song.id || "custom"), bpm: n(song.bpm, 40, 220, 100), beatsPerBar: n(song.beatsPerBar, 2, 6, 4),
+    key: n(song.key, 0, 11, 0), transpose: n(song.transpose, -12, 12, 0), engine: song.engine === "elevenlabs" ? "elevenlabs" : "builtin",
+  };
+  const tr = song.track;
+  if (tr && typeof tr.audio === "string" && tr.audio.startsWith("data:audio/")) out.track = { id: uid(), audio: tr.audio, duration: Number(tr.duration) || 0, key: String(tr.key || "") };
+  return out;
+}
+
+// ---------- songs ----------
+const notesOf = (scene) => (storyboard?.song && scene.lyrics && scene.melody ? buildNotes(scene.lyrics, scene.melody).notes : []);
+const isSung = (scene) => notesOf(scene).some((n) => n.pitch);
+const barSeconds = () => (60 / storyboard.song.bpm) * storyboard.song.beatsPerBar;
+
+/** Keep every scene on the song's beat grid (mirrors fitSongDurations on the server). */
+function fitSongDurations() {
+  if (!storyboard?.song) return;
+  const beat = 60 / storyboard.song.bpm, bar = barSeconds();
+  storyboard.scenes.forEach((sc, i) => {
+    const notes = notesOf(sc);
+    if (notes.length) {
+      sc.layout = "lyrics";
+      sc.duration = Math.round(totalBeats(notes) * beat * 1000) / 1000;
+      sc.narration = sc.lyrics.replace(/-/g, "");
+    } else {
+      if (sc.layout === "lyrics") sc.layout = "title";
+      sc.duration = Math.round(Math.max(1, Math.ceil(sc.duration / bar - 0.05)) * bar * 1000) / 1000;
+    }
+    syncSceneInputs(i);
+  });
+}
+
+/** Song timeline for the backing track: sung lines with their start times. */
+function songTimeline() {
+  let start = 0;
+  const lines = [];
+  for (const sc of storyboard.scenes) {
+    const notes = notesOf(sc);
+    if (notes.length) lines.push({ start, notes });
+    start += sc.duration;
+  }
+  return { ...storyboard.song, lines };
+}
+
+/** ElevenLabs composition plan: one section per scene, sung lines as lyrics. */
+function compositionPlan() {
+  const song = storyboard.song;
+  const audienceStyle = { "little-kids": "for toddlers and preschoolers", kids: "for kids", teens: "for teens", "young-adults": "for young adults" }[storyboard.audience] || "family friendly";
+  const singer = castFor(storyboard.scenes.find(isSung) || storyboard.scenes[0]);
+  const known = song.id !== "custom" ? [`the traditional melody of the nursery rhyme "${storyboard.title}"`] : [];
+  return {
+    positive_global_styles: ["children's sing-along song", audienceStyle, "cheerful", "clear lead vocal",
+      singer?.description || "warm friendly singer", "ukulele, glockenspiel, light percussion", `${Math.round(song.bpm)} bpm`, ...known],
+    negative_global_styles: ["explicit lyrics", "heavy distortion", "screaming", "dark mood"],
+    sections: storyboard.scenes.map((sc, i) => isSung(sc)
+      ? { section_name: `Line ${i}`, positive_local_styles: ["sung"], negative_local_styles: [], duration_ms: Math.round(sc.duration * 1000), lines: [sc.lyrics.replace(/-/g, "")] }
+      : { section_name: i === 0 ? "Intro" : i === storyboard.scenes.length - 1 ? "Outro" : `Break ${i}`, positive_local_styles: ["instrumental"], negative_local_styles: ["vocals"], duration_ms: Math.round(sc.duration * 1000), lines: [] }),
+  };
+}
+const planKey = () => JSON.stringify(compositionPlan());
+const useTrack = () => storyboard?.song?.engine === "elevenlabs";
+const trackFresh = () => useTrack() && storyboard.song.track && storyboard.song.track.key === planKey();
+
+async function composeTrack() {
+  const btn = $("songTrackBtn");
+  const short = storyboard.scenes.find((sc) => sc.duration < 3);
+  if (short) return showNotice("ElevenLabs needs every scene to be at least 3 seconds. Slow the tempo or lengthen short scenes.", "error");
+  pause();
+  btn.disabled = true; btn.textContent = "🎵 Composing… (this can take a minute)";
+  try {
+    const key = planKey();
+    const res = await fetch("/api/song-track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan: JSON.parse(key) }) });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Composing failed (${res.status})`);
+    const blob = await res.blob();
+    const buffer = await soundtrack.decode(await blob.arrayBuffer());
+    const track = { id: uid(), audio: await blobToDataURL(blob), duration: buffer.duration, key };
+    buffers.set(track.id, buffer);
+    storyboard.song.track = track;
+    save(); updateSongPanel();
+    play();
+  } catch (err) {
+    showNotice(err.message, "error");
+  } finally {
+    btn.disabled = false; btn.textContent = "🎵 Compose the song with ElevenLabs";
+  }
+}
+
+function updateSongPanel() {
+  const song = storyboard?.song;
+  $("songPanel").hidden = !song;
+  $("voiceAllBtn").textContent = song ? "🎵 Generate singing & voices" : "🔊 Generate all voice-overs";
+  if (!song) return;
+  $("bpm").value = song.bpm; $("bpmLabel").textContent = `${Math.round(song.bpm)} bpm`;
+  $("transpose").value = song.transpose;
+  $("keyLabel").textContent = `${KEYS[((song.key + song.transpose) % 12 + 12) % 12]} (${song.transpose > 0 ? "+" : ""}${song.transpose})`;
+  $("songEngine").value = song.engine;
+  $("songEngine").querySelector("[value=elevenlabs]").disabled = !serverStatus.music;
+  $("songTrackBtn").hidden = song.engine !== "elevenlabs";
+  $("songHint").textContent = song.engine === "elevenlabs"
+    ? (trackFresh() ? "✓ Song composed. Spoken scenes still use the cast voices." : "Compose the song after you finish editing lyrics and timing. ElevenLabs writes its own arrangement, so the tune may differ from the traditional one.")
+    : serverStatus.singing ? "The singer follows the melody exactly, and the backing music is harmonized automatically."
+      : "Singing needs the free voice engine (npm run setup:voices). You can still record 🎙 yourself singing each line.";
+}
+
 function save() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(storyboard)); }
   catch {
     // too big for localStorage (images / audio): keep the text, drop the media
     try {
-      const lite = { ...storyboard, scenes: storyboard.scenes.map(({ image, voiceover, ...s }) => s) };
+      const lite = { ...storyboard, song: storyboard.song && { ...storyboard.song, track: undefined }, scenes: storyboard.scenes.map(({ image, voiceover, ...s }) => s) };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(lite));
     } catch { /* storage unavailable: autosave is best-effort */ }
   }
@@ -125,12 +237,14 @@ function setStoryboard(sb, { keepTime = false } = {}) {
   loadFont(sb.font);
   renderCast();
   renderScenes();
+  updateSongPanel();
   refresh();
   save();
 }
 
 /** Re-sync renderer after an edit without rebuilding the editor. */
 function changed() {
+  if (storyboard.song) updateSongPanel();
   renderer.setStoryboard(storyboard);
   player.t = Math.min(player.t, totalDuration());
   updateSceneHeaders();
@@ -154,14 +268,20 @@ function loadFont(font) {
 
 // ---------- voice-over ----------
 const castFor = (scene) => storyboard.cast.find((c) => c.name === scene.speaker) || storyboard.cast[0];
-const voKey = (scene) => { const c = castFor(scene); return JSON.stringify([scene.narration.trim(), c.voice, c.effect, c.speed]); };
+const voKey = (scene) => {
+  const c = castFor(scene);
+  if (isSung(scene)) return JSON.stringify(["sing", scene.lyrics, scene.melody, storyboard.song.bpm, storyboard.song.transpose, c.voice, c.effect]);
+  return JSON.stringify([scene.narration.trim(), c.voice, c.effect, c.speed]);
+};
 
 function voState(i) {
   const s = storyboard.scenes[i];
-  if (busy.has(i)) return ["busy", "generating…"];
+  if (busy.has(i)) return ["busy", isSung(s) ? "singing…" : "generating…"];
+  if (isSung(s) && useTrack()) return trackFresh() ? ["ok", "🎵 in ElevenLabs song"] : ["stale", "compose the song"];
   if (!s.voiceover) return ["", s.narration.trim() ? "no voice yet" : "no narration"];
-  const label = `${s.voiceover.source === "tts" ? "✓" : "🎙"} ${s.voiceover.duration.toFixed(1)}s`;
-  if (s.voiceover.source === "tts" && s.voiceover.key !== voKey(s)) return ["stale", `${label} · needs update`];
+  const generated = s.voiceover.source === "tts" || s.voiceover.source === "sing";
+  const label = `${s.voiceover.source === "sing" ? "🎵" : generated ? "✓" : "🎙"} ${s.voiceover.duration.toFixed(1)}s`;
+  if (generated && s.voiceover.key !== voKey(s)) return ["stale", `${label} · needs update`];
   return ["ok", label];
 }
 
@@ -176,10 +296,13 @@ async function blobToDataURL(blob) {
 async function setVoiceover(i, blob, source) {
   const scene = storyboard.scenes[i];
   const buffer = await soundtrack.decode(await blob.arrayBuffer());
-  const vo = { id: uid(), audio: await blobToDataURL(blob), duration: Math.round(buffer.duration * 100) / 100, key: source === "tts" ? voKey(scene) : "", source };
+  const vo = { id: uid(), audio: await blobToDataURL(blob), duration: Math.round(buffer.duration * 100) / 100, key: source === "tts" || source === "sing" ? voKey(scene) : "", source };
   buffers.set(vo.id, buffer);
   scene.voiceover = vo;
-  if ($("fitVoice").checked) scene.duration = Math.min(30, Math.max(2.5, Math.round((vo.duration + VOICE_LEAD + 0.6) * 10) / 10));
+  if ($("fitVoice").checked && !isSung(scene)) {
+    scene.duration = Math.min(30, Math.max(2.5, Math.round((vo.duration + VOICE_LEAD + 0.6) * 10) / 10));
+    if (storyboard.song) fitSongDurations(); // snap to whole bars
+  }
   syncSceneInputs(i);
 }
 
@@ -193,13 +316,24 @@ async function requestTTS(text, member) {
   return res.blob();
 }
 
+async function requestSing(scene, member) {
+  const res = await fetch("/api/sing", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notes: notesOf(scene), bpm: storyboard.song.bpm, voice: member.voice, effect: member.effect, transpose: storyboard.song.transpose }),
+  });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Singing failed (${res.status})`);
+  return res.blob();
+}
+
 async function generateVoice(i) {
   const scene = storyboard.scenes[i];
-  if (!scene.narration.trim()) throw new Error(`Scene ${i + 1} has no narration to speak.`);
+  const sung = isSung(scene);
+  if (sung && useTrack()) throw new Error("With ElevenLabs Music, the sung lines come from the composed song. Use “Compose the song”.");
+  if (!sung && !scene.narration.trim()) throw new Error(`Scene ${i + 1} has no narration to speak.`);
   const member = castFor(scene);
   if (!member.voice) throw new Error(`Pick a voice for ${member.name} first.`);
   busy.add(i); updateSceneHeaders();
-  try { await setVoiceover(i, await requestTTS(scene.narration, member), "tts"); }
+  try { await setVoiceover(i, sung ? await requestSing(scene, member) : await requestTTS(scene.narration, member), sung ? "sing" : "tts"); }
   finally { busy.delete(i); changed(); }
 }
 
@@ -207,14 +341,16 @@ async function generateAllVoices() {
   const btn = $("voiceAllBtn");
   const todo = storyboard.scenes.map((s, i) => i).filter((i) => {
     const s = storyboard.scenes[i];
-    return s.narration.trim() && (!s.voiceover || (s.voiceover.source === "tts" && s.voiceover.key !== voKey(s)));
+    if (isSung(s) && useTrack()) return false;
+    const generated = s.voiceover && (s.voiceover.source === "tts" || s.voiceover.source === "sing");
+    return (isSung(s) || s.narration.trim()) && (!s.voiceover || (generated && s.voiceover.key !== voKey(s)));
   });
-  if (!todo.length) { $("voiceProgress").textContent = "All scenes already have up-to-date voice-overs."; return; }
+  if (!todo.length) { $("voiceProgress").textContent = useTrack() && !trackFresh() ? "Voices are ready. Now compose the song with ElevenLabs." : "All scenes already have up-to-date voice-overs."; return; }
   pause();
   btn.disabled = true;
   let failed = 0;
   for (const [n, i] of todo.entries()) {
-    $("voiceProgress").textContent = `Voicing scene ${i + 1} (${n + 1} of ${todo.length})…`;
+    $("voiceProgress").textContent = `${isSung(storyboard.scenes[i]) ? "Singing" : "Voicing"} scene ${i + 1} (${n + 1} of ${todo.length})…`;
     try { await generateVoice(i); } catch (err) { failed++; showNotice(err.message, "error"); }
   }
   $("voiceProgress").textContent = failed ? `Done with ${failed} error(s).` : `✓ ${todo.length} voice-over(s) ready. Press play!`;
@@ -222,6 +358,10 @@ async function generateAllVoices() {
 }
 
 async function ensureBuffers() {
+  const tr = storyboard.song?.track;
+  if (tr && !buffers.has(tr.id)) {
+    try { buffers.set(tr.id, await soundtrack.decode(await (await fetch(tr.audio)).arrayBuffer())); } catch { delete storyboard.song.track; }
+  }
   for (const s of storyboard.scenes) {
     const vo = s.voiceover;
     if (vo && !buffers.has(vo.id)) {
@@ -236,10 +376,19 @@ function voiceClips() {
   const clips = [];
   for (const s of storyboard.scenes) {
     const b = s.voiceover && buffers.get(s.voiceover.id);
-    if (b) clips.push({ buffer: b, at: start + VOICE_LEAD });
+    const sung = isSung(s);
+    // sung lines start on the beat and don't duck the music; the ElevenLabs song already contains them
+    if (b && !(sung && trackFresh())) clips.push({ buffer: b, at: start + (sung ? 0 : VOICE_LEAD), duck: !sung });
     start += s.duration;
   }
   return clips;
+}
+
+/** What plays on the music bus: the composed song, a song backing track, or mood music. */
+function musicSource() {
+  if (!storyboard.song) return {};
+  if (trackFresh()) return { track: buffers.get(storyboard.song.track.id) || null };
+  return { song: songTimeline() };
 }
 
 let preview = null;
@@ -370,7 +519,7 @@ async function play() {
   const ac = soundtrack.ensureContext();
   player.startCtx = soundtrack.start({
     mood: $("mood").value, duration: d, offset: player.t, volume: +$("volume").value,
-    voices: voiceClips(), voiceVolume: +$("voiceVolume").value, destinations: [ac.destination],
+    voices: voiceClips(), voiceVolume: +$("voiceVolume").value, ...musicSource(), destinations: [ac.destination],
   });
   player.startT = player.t;
   const tick = () => {
@@ -414,6 +563,12 @@ function renderScenes() {
       const sel = el.querySelector(`[data-f=${k}]`);
       sel.innerHTML = opts.map((o) => `<option value="${o}">${o}</option>`).join("");
     }
+    const sung = isSung(scene);
+    el.querySelector("[data-show=song]").hidden = !storyboard.song || (scene.layout !== "lyrics" && !scene.lyrics);
+    el.querySelector("[data-show=talk]").hidden = sung;
+    el.querySelector(".speaker-label").textContent = sung ? "Singer" : "Speaker";
+    el.querySelector("[data-f=duration]").disabled = sung;
+    if (sung) el.querySelector("[data-f=duration]").title = "Set by the melody and tempo";
     el.querySelector("[data-f=speaker]").innerHTML = storyboard.cast.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
     el.querySelectorAll("[data-f]").forEach((input) => {
       const f = input.dataset.f;
@@ -476,7 +631,7 @@ function updateSceneHeaders() {
     const s = storyboard.scenes[i];
     el.querySelector(".num").textContent = i + 1;
     el.querySelector(".label").textContent = sceneLabel(s);
-    el.querySelector(".dur").textContent = `${s.duration}s`;
+    el.querySelector(".dur").textContent = `${+s.duration.toFixed(1)}s`;
     const status = el.querySelector(".vo-status");
     if (recording?.index === i) return;
     const [cls, text] = voState(i);
@@ -500,6 +655,19 @@ function onField(i, f, input) {
   else if (f === "color1") s.colors[1] = input.value;
   else if (f === "duration") { const v = parseFloat(input.value); if (!(v > 0)) return; s.duration = Math.min(30, Math.max(1, v)); }
   else s[f] = input.value;
+  if (storyboard.song && (f === "lyrics" || f === "melody" || f === "layout")) {
+    if (f === "layout" && s.layout === "lyrics" && !s.melody) s.lyrics ||= s.heading;
+    const { error } = s.lyrics && s.melody ? buildNotes(s.lyrics, s.melody) : { error: "" };
+    const card = input.closest(".scene");
+    card.querySelector(".melody-warn").textContent = error;
+    if (s.lyrics) s.heading = s.lyrics.replace(/-/g, "");
+    fitSongDurations();
+    const sung = isSung(s);
+    card.querySelector("[data-show=talk]").hidden = sung;
+    card.querySelector("[data-show=song]").hidden = false;
+    card.querySelector("[data-f=duration]").disabled = sung;
+    card.querySelector(".speaker-label").textContent = sung ? "Singer" : "Speaker";
+  }
   if (f === "layout") input.closest(".scene").querySelector("[data-show=bullets]").hidden = s.layout !== "bullets";
   // jump preview to the edited scene (past its entrance animation) so edits are visible
   if (!player.playing) player.t = Math.min(sceneStart(i) + Math.min(s.duration - 0.05, 2), totalDuration());
@@ -561,13 +729,13 @@ async function generate(e) {
   try {
     const res = await fetch("/api/storyboard", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: $("prompt").value, duration: +$("duration").value, aspectRatio: $("aspect").value, style: $("style").value, audience }),
+      body: JSON.stringify({ prompt: $("prompt").value, duration: +$("duration").value, aspectRatio: $("aspect").value, style: $("style").value, audience, type: videoType, songId: $("songPick").value }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     if (data.notice) showNotice(data.notice);
     setStoryboard(sanitize(data.storyboard));
-    $("voiceProgress").textContent = serverStatus.tts ? "Next: press “Generate all voice-overs” to give every scene a voice." : "";
+    $("voiceProgress").textContent = serverStatus.tts ? `Next: press “${storyboard.song ? "Generate singing & voices" : "Generate all voice-overs"}”.` : "";
     play();
   } catch (err) {
     showNotice(err.message, "error");
@@ -615,7 +783,7 @@ async function exportVideo() {
     recorder.start(250);
     const start = soundtrack.start({
       mood: $("mood").value, duration: d, offset: 0, volume: +$("volume").value,
-      voices: voiceClips(), voiceVolume: +$("voiceVolume").value, destinations: [dest],
+      voices: voiceClips(), voiceVolume: +$("voiceVolume").value, ...musicSource(), destinations: [dest],
     });
 
     await new Promise((resolve) => {
@@ -689,7 +857,8 @@ function addConvertButton(blob, name) {
 // ---------- project files ----------
 function downloadProject() {
   if (!storyboard) return;
-  const data = { ...storyboard, scenes: storyboard.scenes.map(({ voiceover, ...s }) => (voiceover ? { ...s, voiceover: { ...voiceover, id: undefined } } : s)) };
+  const song = storyboard.song && { ...storyboard.song, track: storyboard.song.track && { ...storyboard.song.track, id: undefined } };
+  const data = { ...storyboard, ...(song ? { song } : {}), scenes: storyboard.scenes.map(({ voiceover, ...s }) => (voiceover ? { ...s, voiceover: { ...voiceover, id: undefined } } : s)) };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob); a.download = `${fileBase()}.json`; a.click();
@@ -700,11 +869,34 @@ async function loadProject(file) {
   catch (err) { showNotice(`Could not open project: ${err.message}`, "error"); }
 }
 
+function setVideoType(t) {
+  videoType = t;
+  document.querySelectorAll("#videoType button").forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+  $("songPickLabel").hidden = t !== "song";
+  const custom = $("songPick").value === "custom";
+  $("prompt").placeholder = t !== "song"
+    ? "e.g. A 30-second promo for a neighborhood coffee shop that roasts its own beans and opens at 6am"
+    : custom ? "What should the song be about? e.g. A happy song about brushing your teeth every morning and night"
+      : "Optional: how should it look? e.g. cute farm animals, pastel colors";
+  if (t === "song" && audience === "general") setAudience("little-kids", false);
+}
+
 // ---------- wiring ----------
 $("promptForm").addEventListener("submit", generate);
-$("examples").append(...EXAMPLES.map(([ex, a]) => {
-  const b = document.createElement("button"); b.type = "button"; b.textContent = ex.length > 38 ? ex.slice(0, 36) + "…" : ex; b.title = ex;
-  b.addEventListener("click", () => { $("prompt").value = ex; setAudience(a, false); });
+document.querySelectorAll("#videoType button").forEach((b) => b.addEventListener("click", () => setVideoType(b.dataset.t)));
+$("songPick").addEventListener("change", () => setVideoType("song"));
+$("bpm").addEventListener("input", (e) => { storyboard.song.bpm = +e.target.value; fitSongDurations(); updateSongPanel(); changed(); });
+$("bpm").addEventListener("change", restartIfPlaying);
+$("transpose").addEventListener("input", (e) => { storyboard.song.transpose = +e.target.value; updateSongPanel(); changed(); });
+$("transpose").addEventListener("change", restartIfPlaying);
+$("songEngine").addEventListener("change", (e) => { storyboard.song.engine = e.target.value; updateSongPanel(); changed(); restartIfPlaying(); });
+$("songTrackBtn").addEventListener("click", composeTrack);
+$("examples").append(...EXAMPLES.map(([ex, a, type = "talk"]) => {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = (type === "song" ? "🎵 " : "") + (ex.length > 36 ? ex.slice(0, 34) + "…" : ex); b.title = ex;
+  b.addEventListener("click", () => {
+    if (type === "song") $("songPick").value = "custom";
+    setVideoType(type); $("prompt").value = ex; setAudience(a, false);
+  });
   return b;
 }));
 document.querySelectorAll("#audience button").forEach((b) => b.addEventListener("click", () => setAudience(b.dataset.a)));
@@ -773,7 +965,9 @@ document.addEventListener("keydown", (e) => {
 
 async function init() {
   try {
-    const [status, voices] = await Promise.all([fetch("/api/status").then((r) => r.json()), fetch("/api/voices").then((r) => r.json())]);
+    const [status, voices, songs] = await Promise.all(["/api/status", "/api/voices", "/api/songs"].map((u) => fetch(u).then((r) => r.json())));
+    $("songPick").insertAdjacentHTML("afterbegin", songs.songs.map((x) => `<option value="${esc(x.id)}">🎵 ${esc(x.title)}</option>`).join(""));
+    $("songPick").value = songs.songs[0]?.id || "custom";
     serverStatus = status;
     catalog = voices;
     $("status").innerHTML = status.ai

@@ -73,6 +73,39 @@ test("POST /api/tts synthesizes speech with Kokoro and an effect", { skip: !prov
   assert.ok(buf.length > 5000, `audio is ${buf.length} bytes`);
 });
 
+test("POST /api/storyboard builds a classic nursery rhyme without an API key", async () => {
+  const res = await fetch(`${base}/api/storyboard`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "song", songId: "mary", prompt: "" }),
+  });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(body.storyboard.song.id, "mary");
+  assert.ok(body.storyboard.scenes.some((s) => s.layout === "lyrics"));
+});
+
+test("POST /api/storyboard needs an API key for an original song", async () => {
+  const res = await fetch(`${base}/api/storyboard`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "song", songId: "custom", prompt: "brushing teeth" }),
+  });
+  assert.equal(res.status, 400);
+});
+
+test("POST /api/sing sings a line", { skip: !providers().singing && "singing engine not installed (npm run setup:voices)", timeout: 120000 }, async () => {
+  const res = await fetch(`${base}/api/sing`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ bpm: 100, voice: "kokoro:af_heart", notes: [{ text: "Twin", word: 0, pitch: 60, beats: 1 }, { text: "kle", word: 0, pitch: 60, beats: 1 }, { text: "star", word: 1, pitch: 67, beats: 2 }] }),
+  });
+  assert.equal(res.status, 200);
+  assert.ok((await res.arrayBuffer()).byteLength > 5000);
+});
+
+test("POST /api/sing rejects non-Kokoro voices", async () => {
+  const res = await fetch(`${base}/api/sing`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bpm: 100, voice: "openai:nova", notes: [{ text: "la", pitch: 60, beats: 1 }] }) });
+  assert.equal(res.status, 400);
+});
+
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 test("POST /api/convert turns WebM into MP4", { skip: !hasFfmpeg && "ffmpeg not installed" }, async () => {
   const dir = mkdtempSync(path.join(tmpdir(), "aivideo-test-"));

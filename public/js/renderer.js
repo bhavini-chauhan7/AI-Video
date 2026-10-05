@@ -1,3 +1,5 @@
+import { buildNotes } from "./song.js";
+
 // Canvas renderer: turns a storyboard into frames. Pure function of time,
 // so preview, seeking and export all draw the exact same thing.
 
@@ -104,7 +106,7 @@ export class VideoRenderer {
     } else {
       this.drawScene(cur.scene, local, W, H, cur.index);
     }
-    if (this.options.captions && cur.scene.narration) this.drawCaption(cur.scene, local, W, H);
+    if (this.options.captions && cur.scene.narration && cur.scene.layout !== "lyrics") this.drawCaption(cur.scene, local, W, H);
     ctx.restore();
   }
 
@@ -293,6 +295,10 @@ export class VideoRenderer {
     };
 
     switch (scene.layout) {
+      case "lyrics":
+        if (scene.lyrics && scene.melody) this.drawLyrics(scene, t, W, H);
+        else this.text(scene.heading, cx, H * 0.45, { size: m * 0.08, maxWidth: maxW, anim, p: prog(0) });
+        break;
       case "title":
       case "closing": {
         const closing = scene.layout === "closing";
@@ -359,6 +365,102 @@ export class VideoRenderer {
         break;
       }
     }
+  }
+
+  /** Sung syllables with start times (seconds into the scene), cached per lyrics+melody+tempo. */
+  syllableTimes(scene) {
+    const bpm = this.storyboard.song?.bpm || 100;
+    const key = `${scene.lyrics}|${scene.melody}|${bpm}`;
+    this.sylCache ??= new Map();
+    if (!this.sylCache.has(key)) {
+      const spb = 60 / bpm;
+      let t = 0;
+      const syl = [];
+      for (const n of buildNotes(scene.lyrics, scene.melody).notes) {
+        if (n.pitch && n.text) {
+          if (n.hold && syl.length) syl.at(-1).end = t + n.beats * spb;
+          else syl.push({ text: n.text, word: n.word, start: t, end: t + n.beats * spb });
+        }
+        t += n.beats * spb;
+      }
+      this.sylCache.set(key, syl);
+    }
+    return this.sylCache.get(key);
+  }
+
+  /** Karaoke lyrics: syllables light up as they are sung, with a bouncing ball. */
+  drawLyrics(scene, t, W, H) {
+    const { ctx } = this;
+    const m = Math.min(W, H);
+    const syl = this.syllableTimes(scene);
+    const size = m * (H > W ? 0.07 : 0.082);
+    const maxW = W * 0.84;
+    ctx.save();
+    ctx.font = `800 ${size}px ${this.font}`;
+    ctx.textBaseline = "alphabetic";
+    // group syllables into words, then wrap words into lines
+    const words = [];
+    syl.forEach((s) => {
+      if (!words.length || words.at(-1).word !== s.word) words.push({ word: s.word, parts: [] });
+      words.at(-1).parts.push(s);
+    });
+    const space = ctx.measureText(" ").width;
+    const lines = [[]];
+    let lineW = 0;
+    for (const w of words) {
+      w.width = w.parts.reduce((a, p) => a + (p.w = ctx.measureText(p.text).width), 0);
+      if (lineW && lineW + space + w.width > maxW) { lines.push([]); lineW = 0; }
+      lineW += (lineW ? space : 0) + w.width;
+      lines.at(-1).push(w);
+    }
+    const lh = size * 1.35;
+    const blockH = lines.length * lh;
+    const top = H * 0.56 - blockH / 2;
+
+    // emoji bounces on the beat
+    const beat = 60 / (this.storyboard.song?.bpm || 100);
+    if (scene.emoji) {
+      const hop = Math.abs(Math.sin((Math.PI * t) / beat));
+      ctx.font = `${m * 0.12}px ${this.font}`; ctx.textAlign = "center";
+      ctx.globalAlpha = clamp(t / 0.3);
+      ctx.fillText(scene.emoji, W / 2, top - m * 0.1 - hop * m * 0.025);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.font = `800 ${size}px ${this.font}`;
+    ctx.textAlign = "left";
+    let ball = null;
+    lines.forEach((line, li) => {
+      const width = line.reduce((a, w, i) => a + w.width + (i ? space : 0), 0);
+      let x = (W - width) / 2;
+      const y = top + (li + 1) * lh - size * 0.3;
+      line.forEach((w) => {
+        for (const p of w.parts) {
+          const sung = t >= p.start;
+          const active = t >= p.start && t < p.end;
+          ctx.save();
+          ctx.shadowColor = "rgba(0,0,0,0.45)"; ctx.shadowBlur = size * 0.2; ctx.shadowOffsetY = size * 0.05;
+          ctx.fillStyle = sung ? scene.accent : "rgba(255,255,255,0.92)";
+          if (active) {
+            const k = 1 + 0.08 * Math.sin(clamp((t - p.start) / Math.min(0.25, p.end - p.start)) * Math.PI);
+            ctx.translate(x + p.w / 2, y - size * 0.35); ctx.scale(k, k); ctx.translate(-(x + p.w / 2), -(y - size * 0.35));
+            ball = { x: x + p.w / 2, y: y - size * 1.05, phase: clamp((t - p.start) / Math.max(0.1, p.end - p.start)) };
+          }
+          ctx.globalAlpha = clamp(t / 0.25);
+          ctx.fillText(p.text, x, y);
+          ctx.restore();
+          x += p.w;
+        }
+        x += space;
+      });
+    });
+    if (ball) {
+      const r = size * 0.16;
+      const yb = ball.y - Math.sin(ball.phase * Math.PI) * size * 0.35;
+      ctx.fillStyle = "#ffffff"; ctx.shadowColor = scene.accent; ctx.shadowBlur = r * 2;
+      ctx.beginPath(); ctx.arc(ball.x, yb, r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
   }
 
   drawCaption(scene, t, W, H) {

@@ -1,6 +1,6 @@
 // Installs the free, offline Kokoro text-to-speech engine:
-//   1. pip install kokoro-onnx + soundfile
-//   2. download the model (~90 MB) and voices (~28 MB) into ./models
+//   1. pip install kokoro-onnx + soundfile + pyworld (pyworld powers singing)
+//   2. download the model (~180 MB) and voices (~28 MB) into ./models
 // Usage: npm run setup:voices
 import { spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, renameSync } from "node:fs";
@@ -13,12 +13,13 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MODELS = process.env.KOKORO_DIR || path.join(ROOT, "models");
 const PYTHON = process.env.TTS_PYTHON || "python3";
 const BASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0";
-const FILES = ["kokoro-v1.0.int8.onnx", "voices-v1.0.bin"];
+// fp16 is ~5x faster than int8 on most CPUs (int8 needs VNNI instructions to be fast)
+const FILES = ["kokoro-v1.0.fp16.onnx", "voices-v1.0.bin"];
 
 function step(msg) { console.log(`\n▶ ${msg}`); }
 
 step(`Installing Python packages with ${PYTHON} -m pip`);
-const pip = spawnSync(PYTHON, ["-m", "pip", "install", "--upgrade", "kokoro-onnx", "soundfile"], { stdio: "inherit" });
+const pip = spawnSync(PYTHON, ["-m", "pip", "install", "--upgrade", "kokoro-onnx", "soundfile", "pyworld"], { stdio: "inherit" });
 if (pip.status !== 0) {
   console.error(`\npip failed. Make sure Python 3.10+ is installed (set TTS_PYTHON to its path if it isn't "python3").`);
   process.exit(1);
@@ -45,6 +46,6 @@ for (const name of FILES) {
 }
 
 step("Checking the engine");
-const check = spawnSync(PYTHON, ["-c", "import kokoro_onnx, soundfile; print('ok')"], { encoding: "utf8" });
+const check = spawnSync(PYTHON, ["-c", "import kokoro_onnx, soundfile, pyworld; print('ok')"], { encoding: "utf8" });
 if (check.status !== 0) { console.error(check.stderr); process.exit(1); }
 console.log("\n✅ Voices ready. Restart the server (npm start) and the voice pickers will fill in.");

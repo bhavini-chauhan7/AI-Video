@@ -1,6 +1,6 @@
 # 🎬 AI Video Generator
 
-Describe the video you want and get an animated, voiced video ready for YouTube: scenes, on-screen text, voice-overs with multiple character voices, captions, transitions and a soundtrack. It's built for kids' channels and for content aimed at teens and young adults.
+Describe the video you want and get an animated, voiced video ready for YouTube: scenes, on-screen text, voice-overs with multiple character voices, **sung nursery rhymes and original songs with karaoke lyrics**, captions, transitions and a soundtrack. It's built for kids' channels and for content aimed at teens and young adults.
 
 1. **Pick the audience and describe the video.** The audiences are Little kids (3–6), Kids (7–12), Teens, Gen Z (18–25) or Everyone. Then type something like *"A bedtime story about a little dragon who was scared of the dark"* and pick a length, a format (16:9 for YouTube, 9:16 for Shorts, or 1:1) and an optional style.
 2. **Claude writes the storyboard.** You get a scene-by-scene plan with headings, narration, a **cast of characters with voice styles**, layouts, colors, transitions and animations, all written for the audience you picked. Kids' videos follow YouTube's made-for-kids rules (no "like and subscribe").
@@ -12,7 +12,7 @@ Describe the video you want and get an animated, voiced video ready for YouTube:
 
 ```bash
 npm install
-npm run setup:voices                  # free offline voices: installs Kokoro TTS + downloads ~120 MB of models
+npm run setup:voices                  # free offline voices + singing: installs Kokoro TTS and pyworld, downloads ~210 MB of models
 export ANTHROPIC_API_KEY=sk-ant-...   # optional, enables AI-written storyboards
 npm start                             # http://localhost:3000
 ```
@@ -20,6 +20,19 @@ npm start                             # http://localhost:3000
 Without an API key the app still works. It builds a template storyboard from your prompt, and you can edit that by hand. Without a voice engine you can still record or upload a voice-over for each scene.
 
 Requirements: Node.js 20+, Python 3.10+ (for the free voices) and a recent Chrome, Edge or Firefox. `ffmpeg` is recommended: it powers the voice effects (kid, robot, monster…), loudness normalization and WebM-to-MP4 conversion.
+
+## Songs and nursery rhymes
+
+Click **🎵 Song / nursery rhyme**, pick a song, press **Generate**, then **🎵 Generate singing & voices**.
+
+- **Classic rhymes (free, no API key needed):** Twinkle Twinkle Little Star, Mary Had a Little Lamb, London Bridge, Row Row Row Your Boat and Old MacDonald. All use traditional, public-domain lyrics and melodies.
+- **Original songs:** Claude writes the lyrics *and* the melody, and repeats the chorus so kids learn it. This needs `ANTHROPIC_API_KEY`. Original songs are better for a monetized channel than rhymes everyone uses.
+- **Built-in singer (free, offline):** each syllable is spoken by a Kokoro voice, then the WORLD vocoder re-times it to the beat and tunes it to the melody note, with vibrato. It sounds like a friendly synthetic singer, in the style of Vocaloid, rather than a human. The character effects work while singing too: kid, chipmunk, robot, monster and more.
+- **Backing music:** chords are worked out from the melody automatically, and the arrangement is ukulele strums, bass, a bell doubling the tune, and light drums.
+- **Karaoke lyrics:** each syllable lights up as it's sung, with a bouncing ball, so kids can sing along.
+- **Edit anything:** tempo, key, the lyrics and the melody. Melodies use simple note text (`C4 C4 G4 G4 A4 A4 G4:2`; `:2` means two beats, `R` is a rest), and the app warns you if the syllable and note counts don't match.
+- **ElevenLabs Music (paid, optional):** with `ELEVENLABS_API_KEY` set, choose "ElevenLabs Music" and click **Compose** to get a studio-quality song with real-sounding vocals. Each scene becomes one section of the song, so the lyrics stay in sync. ElevenLabs writes its own arrangement, so a classic rhyme's tune may not match the traditional one exactly.
+- **Your own voice:** you can always record 🎙 yourself singing any line.
 
 ## Voices
 
@@ -55,6 +68,7 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | **Text animation** | fade, slide-up, typewriter, pop |
 | **Music** | generated in the browser to match the mood (calm, upbeat, epic, playful), or your own audio file |
 | **Audiences** | little kids, kids, teens, Gen Z and everyone, each with its own writing style, pacing, fonts, music and narrator |
+| **Songs** | 5 classic nursery rhymes plus AI-written originals; free built-in singer or ElevenLabs Music; karaoke lyrics; auto-harmonized backing |
 | **Voice-over** | multi-character cast, 46 free voices plus ElevenLabs and OpenAI, character effects, mic recording, music ducking under speech |
 | **Captions** | narration shown as subtitles, timed across each scene |
 | **Fonts** | modern, rounded (Baloo 2, also covers Hindi script), bold (Poppins) |
@@ -71,7 +85,7 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | `FFMPEG_PATH` | `ffmpeg` | ffmpeg binary used for voice effects and MP4 conversion |
 | `TTS_PYTHON` | `python3` | Python used to run the Kokoro voice engine |
 | `KOKORO_DIR` | `./models` | Where the Kokoro model files live |
-| `ELEVENLABS_API_KEY` | none | Enables ElevenLabs voices (`ELEVENLABS_MODEL`, default `eleven_multilingual_v2`) |
+| `ELEVENLABS_API_KEY` | none | Enables ElevenLabs voices (`ELEVENLABS_MODEL`, default `eleven_multilingual_v2`) and ElevenLabs Music (`ELEVENLABS_MUSIC_MODEL`, default `music_v1`) |
 | `OPENAI_API_KEY` | none | Enables OpenAI voices (`OPENAI_TTS_MODEL`, default `gpt-4o-mini-tts`) |
 
 ## How it works
@@ -82,6 +96,8 @@ browser                                   server (Express)
 prompt + audience ─ POST /api/storyboard ▶ Claude → storyboard + cast JSON (validated + normalized)
 storyboard editor ◀─────────────────────  (template fallback if no key / API error)
 scene narration ─── POST /api/tts ───────▶ Kokoro / ElevenLabs / OpenAI → ffmpeg effects → MP3
+sung line ───────── POST /api/sing ──────▶ Kokoro syllables → WORLD vocoder (pitch + timing) → MP3
+whole song ──────── POST /api/song-track ▶ ElevenLabs Music (optional)
 canvas renderer (pure function of time) + Web Audio mix (voices + ducked music)
 MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg → H.264 MP4
 ```
@@ -89,7 +105,8 @@ MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg
 - `lib/claude.js`: the prompt and the Claude call (structured outputs, refusal handling, server-side fallback).
 - `lib/storyboard.js`: the storyboard schema (including cast and audiences), normalization or clamping of any input, and the offline template generator.
 - `lib/voices.js`: the voice catalog, character presets and ffmpeg effect chains.
-- `lib/tts.js`: the TTS engines (a persistent Kokoro Python worker, plus ElevenLabs and OpenAI), effects and a cache. `tts/kokoro_worker.py` is the worker.
+- `lib/tts.js`: the TTS engines (a persistent Kokoro Python worker, plus ElevenLabs and OpenAI), singing, ElevenLabs Music, effects and a cache. `tts/kokoro_worker.py` is the worker, and `tts/singer.py` turns speech into singing.
+- `lib/songs.js`: the nursery-rhyme songbook. `public/js/song.js` holds the melody parser, syllable matching and auto-harmonizer, and is shared by the server and the browser.
 - `public/js/renderer.js`: draws any frame at time `t`. Preview, seeking and export all go through the same code path.
 - `public/js/audio.js`: the procedural music engine (pads, bass, arpeggios, drums, reverb), uploaded-track playback, and the voice-over bus with music ducking.
 - `public/js/app.js`: the UI, playback, editing and export.

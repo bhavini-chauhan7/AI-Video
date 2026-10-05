@@ -122,3 +122,14 @@ button.small { font-size: 12px; padding: 5px 10px; margin: 0 0 10px; }
 .vo-actions { display: flex; gap: 2px; padding-bottom: 2px; }
 .vo-actions button { padding: 5px 8px; font-size: 13px; }
 .vo-actions button.rec { background: var(--danger); border-color: var(--danger); }
+
+/* video type + songs */
+.vtype { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.vtype button { padding: 10px 6px; font-weight: 600; }
+.vtype button.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--panel-2)); }
+#songPanel { margin-top: 24px; }
+.song-fields { display: grid; gap: 0; }
+.song-fields input[data-f=melody] { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.melody-warn { color: #fbbf24; margin: -4px 0 8px; }
+.melody-warn:empty { display: none; }
+input:disabled { opacity: .6; }

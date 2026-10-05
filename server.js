@@ -6,9 +6,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
-import { generateStoryboard, hasApiKey, MODEL } from "./lib/claude.js";
-import { fallbackStoryboard, ASPECT_RATIOS, AUDIENCES } from "./lib/storyboard.js";
-import { synthesize, listVoices, providers, availableEffects, hasFfmpeg, FFMPEG, kokoro } from "./lib/tts.js";
+import { generateStoryboard, generateSong, hasApiKey, MODEL } from "./lib/claude.js";
+import { fallbackStoryboard, normalizeStoryboard, ASPECT_RATIOS, AUDIENCES } from "./lib/storyboard.js";
+import { songList, songStoryboard } from "./lib/songs.js";
+import { synthesize, sing, composeSong, listVoices, providers, availableEffects, hasFfmpeg, FFMPEG, kokoro } from "./lib/tts.js";
 import { PRESETS, presetVoice } from "./lib/voices.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,7 +21,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/status", (_req, res) => {
   const p = providers();
-  res.json({ ai: hasApiKey(), model: hasApiKey() ? MODEL : null, mp4: hasFfmpeg, tts: p.kokoro || p.openai || p.elevenlabs });
+  res.json({ ai: hasApiKey(), model: hasApiKey() ? MODEL : null, mp4: hasFfmpeg, tts: p.kokoro || p.openai || p.elevenlabs, singing: p.singing, music: p.music });
 });
 
 /** Give every cast member a concrete voice based on its voiceStyle and the voices this server has. */
@@ -43,6 +44,20 @@ app.get("/api/voices", async (_req, res) => {
   });
 });
 
+app.get("/api/songs", (_req, res) => res.json({ songs: songList() }));
+
+const audioRoute = (fn) => async (req, res) => {
+  try {
+    const { audio, type } = await fn(req.body ?? {});
+    res.type(type).send(audio);
+  } catch (err) {
+    console.error(`${req.path} failed:`, err.message);
+    res.status(err.status || 500).json({ error: err.status ? err.message : `Generation failed: ${err.message.slice(0, 300)}` });
+  }
+};
+app.post("/api/sing", audioRoute(({ notes, bpm, voice, effect, transpose }) => sing({ notes, bpm, voice, effect, transpose })));
+app.post("/api/song-track", audioRoute(({ plan }) => composeSong(plan)));
+
 app.post("/api/tts", async (req, res) => {
   try {
     const { text, voice, effect, speed, style } = req.body ?? {};
@@ -56,13 +71,32 @@ app.post("/api/tts", async (req, res) => {
 
 app.post("/api/storyboard", async (req, res) => {
   const prompt = String(req.body?.prompt ?? "").trim().slice(0, 2000);
-  if (!prompt) return res.status(400).json({ error: "Describe the video you want to create." });
+  const isClassicSong = req.body?.type === "song" && req.body?.songId && req.body.songId !== "custom";
+  if (!prompt && !isClassicSong) return res.status(400).json({ error: "Describe the video you want to create." });
   const duration = Math.min(180, Math.max(5, Number(req.body?.duration) || 30));
   const aspectRatio = ASPECT_RATIOS.includes(req.body?.aspectRatio) ? req.body.aspectRatio : "16:9";
   const style = String(req.body?.style ?? "").slice(0, 300);
   const scenes = Number(req.body?.scenes) > 0 ? Math.min(20, Math.round(Number(req.body.scenes))) : undefined;
   const audience = AUDIENCES[req.body?.audience] ? req.body.audience : "general";
 
+  const songId = String(req.body?.songId ?? "");
+  if (req.body?.type === "song" && songId !== "custom") {
+    try {
+      const sb = normalizeStoryboard(songStoryboard(songId, { aspectRatio, audience }), { aspectRatio });
+      return res.json({ storyboard: await assignVoices(sb), source: "songbook" });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  }
+  if (req.body?.type === "song") {
+    if (!hasApiKey()) return res.status(400).json({ error: "Writing an original song needs ANTHROPIC_API_KEY. You can pick one of the classic nursery rhymes instead." });
+    try {
+      return res.json({ storyboard: await assignVoices(await generateSong({ prompt, duration, aspectRatio, style, audience })), source: "ai" });
+    } catch (err) {
+      console.error("song generation failed:", err);
+      return res.status(502).json({ error: err instanceof Anthropic.APIError ? `Claude API error (${err.status ?? "network"}).` : err.message });
+    }
+  }
   if (!hasApiKey()) {
     return res.json({ storyboard: await assignVoices(fallbackStoryboard({ prompt, duration, aspectRatio, audience })), source: "template",
       notice: "No ANTHROPIC_API_KEY set: generated a template storyboard. Add a key for AI-written scripts." });

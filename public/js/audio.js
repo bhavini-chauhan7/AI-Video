@@ -1,3 +1,5 @@
+import { harmonize } from "./song.js";
+
 // Soundtrack: either a procedurally generated score that matches the
 // storyboard mood, or a user-supplied audio file. Both are scheduled on a
 // Web Audio graph so they can play through speakers and be recorded.
@@ -39,7 +41,7 @@ export class Soundtrack {
    * is ducked under them so speech stays clear.
    * Returns the AudioContext time that corresponds to video time `offset`.
    */
-  start({ mood, duration, offset = 0, volume = 0.6, voices = [], voiceVolume = 1, duck = 0.3, destinations }) {
+  start({ mood, duration, offset = 0, volume = 0.6, voices = [], voiceVolume = 1, duck = 0.3, song = null, track = null, destinations }) {
     const ctx = this.ensureContext();
     this.stop();
     const when = ctx.currentTime + 0.05;
@@ -54,18 +56,29 @@ export class Soundtrack {
     const music = ctx.createGain();
     music.connect(master);
     const g = music.gain;
-    g.setValueAtTime(this.musicLevel(offset, voices, volume, duck), when);
-    for (const v of voices) {
+    const ducked = voices.filter((v) => v.duck !== false);
+    g.setValueAtTime(this.musicLevel(offset, ducked, volume, duck), when);
+    for (const v of ducked) {
       const s = v.at, e = v.at + v.buffer.duration;
       if (e < offset) continue;
       if (s - 0.25 > offset) { g.setValueAtTime(volume, at(s - 0.25)); g.linearRampToValueAtTime(volume * duck, at(s)); }
       g.setValueAtTime(volume * duck, at(e)); g.linearRampToValueAtTime(volume, at(e + 0.4));
     }
     const fadeFrom = Math.max(when, endAt - 1.5);
-    g.cancelScheduledValues(fadeFrom); g.setValueAtTime(this.musicLevel(Math.max(offset, duration - 1.5), voices, volume, duck), fadeFrom);
+    g.cancelScheduledValues(fadeFrom); g.setValueAtTime(this.musicLevel(Math.max(offset, duration - 1.5), ducked, volume, duck), fadeFrom);
     g.linearRampToValueAtTime(0, endAt);
 
-    if (mood === "custom" && this.customBuffer) {
+    if (mood === "none") {
+      // no music
+    } else if (track) {
+      // a fully produced song (e.g. ElevenLabs Music) replaces the generated music
+      const src = ctx.createBufferSource();
+      src.buffer = track;
+      src.connect(music);
+      if (offset < track.duration) { src.start(when, offset); this.nodes.push(src); }
+    } else if (song) {
+      this.scheduleSong(song, duration, offset, when, music);
+    } else if (mood === "custom" && this.customBuffer) {
       const src = ctx.createBufferSource();
       src.buffer = this.customBuffer; src.loop = true;
       src.connect(music);
@@ -90,6 +103,63 @@ export class Soundtrack {
       this.nodes.push(src);
     }
     return when;
+  }
+
+  /**
+   * Backing track for a song: chords picked from the melody, bass, a soft bell
+   * doubling the tune (so kids hear it), and light percussion.
+   * song = { bpm, beatsPerBar, key, transpose, lines: [{ start (s), notes }] }.
+   */
+  scheduleSong(song, duration, offset, when, out) {
+    const ctx = this.ctx;
+    const beat = 60 / song.bpm;
+    const at = (t) => when + t - offset;
+    const tr = song.transpose || 0;
+    const events = [];
+    for (const line of song.lines) {
+      let b = line.start / beat;
+      for (const n of line.notes) {
+        if (n.pitch) events.push({ at: b, pitch: n.pitch + tr, beats: n.beats });
+        b += n.beats;
+      }
+    }
+    const total = duration / beat;
+    const chords = harmonize(events, { key: ((song.key + tr) % 12 + 12) % 12, beatsPerBar: song.beatsPerBar, totalBeats: total });
+    const rev = this.reverb(out);
+    const near = (pc, center) => center + ((pc - center) % 12 + 18) % 12 - 6; // nearest MIDI note with this pitch class
+
+    for (const c of chords) {
+      const t0 = c.at * beat, len = c.beats * beat;
+      if (t0 + len < offset) continue;
+      // soft pad
+      c.tones.forEach((pc) => this.voice({ type: "triangle", freq: midi(near(pc, 60)), start: at(t0), len, gain: 0.045, attack: 0.08, release: 0.25, cutoff: 1500, out: rev, minStart: when }));
+      // bass on the chord change and halfway through
+      const bass = near(c.root, 43);
+      this.voice({ type: "sine", freq: midi(bass), start: at(t0), len: Math.min(len, beat * 1.5), gain: 0.22, attack: 0.01, release: 0.15, out, minStart: when });
+      if (c.beats >= 2) this.voice({ type: "sine", freq: midi(bass + 7), start: at(t0 + len / 2), len: Math.min(len / 2, beat * 1.5), gain: 0.15, attack: 0.01, release: 0.15, out, minStart: when });
+      // strummed "ukulele" chord on each beat
+      for (let b = 0; b < c.beats; b++) {
+        const tb = t0 + b * beat;
+        if (tb < offset || tb >= duration) continue;
+        c.tones.forEach((pc, k) => this.voice({ type: "sawtooth", freq: midi(near(pc, 64)), start: at(tb + k * 0.012), len: beat * 0.45, gain: 0.018, attack: 0.004, release: 0.12, cutoff: 2200, out: rev, minStart: when }));
+      }
+    }
+    // bell doubling the melody an octave up, quietly
+    for (const e of events) {
+      const t0 = e.at * beat;
+      if (t0 < offset - 0.05 || t0 >= duration) continue;
+      this.voice({ type: "sine", freq: midi(e.pitch + 12), start: at(t0), len: Math.min(e.beats * beat, 0.6), gain: 0.05, attack: 0.003, release: 0.35, out: rev, minStart: when });
+    }
+    // light percussion
+    for (let b = 0; b * beat < duration; b++) {
+      const tb = b * beat;
+      if (tb < offset) continue;
+      const inBar = b % song.beatsPerBar;
+      if (inBar === 0) this.kick(at(tb), out);
+      if (song.beatsPerBar === 4 && inBar === 2) this.kick(at(tb), out);
+      this.noise(at(tb + beat / 2), 0.04, 0.035, 7000, "highpass", out);
+      if (song.beatsPerBar === 4 && inBar % 2 === 1) this.noise(at(tb), 0.1, 0.06, 2500, "bandpass", out);
+    }
   }
 
   /** Music gain at video time t (ducked if a voice clip is playing). */
