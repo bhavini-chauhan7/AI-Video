@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AI Video Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Poppins:wght@500;600;700;800;900&display=swap">
   <link rel="stylesheet" href="styles.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
 </head>
@@ -23,6 +26,13 @@
     <section class="panel create">
       <h2>1. Describe your video</h2>
       <form id="promptForm">
+        <div class="audience" id="audience" role="radiogroup" aria-label="Who is the video for?">
+          <button type="button" data-a="little-kids">🧸 Little kids<small>3–6</small></button>
+          <button type="button" data-a="kids">🚀 Kids<small>7–12</small></button>
+          <button type="button" data-a="teens">🎧 Teens<small>13–17</small></button>
+          <button type="button" data-a="young-adults">⚡ Gen Z<small>18–25</small></button>
+          <button type="button" data-a="general" class="on">🌍 Everyone<small>all ages</small></button>
+        </div>
         <textarea id="prompt" rows="5" placeholder="e.g. A 30-second promo for a neighborhood coffee shop that roasts its own beans and opens at 6am" required></textarea>
         <div class="chips" id="examples"></div>
         <div class="row">
@@ -50,7 +60,16 @@
         <p class="notice" id="notice" hidden></p>
       </form>
 
-      <h2>Audio & captions</h2>
+      <h2>Voices & cast</h2>
+      <p class="hint" id="ttsHint"></p>
+      <div id="castList"></div>
+      <button type="button" class="ghost small" id="addCast">+ Add character</button>
+      <button type="button" class="primary" id="voiceAllBtn" disabled>🔊 Generate all voice-overs</button>
+      <p class="hint" id="voiceProgress"></p>
+      <label class="check"><input type="checkbox" id="fitVoice" checked> Fit scene length to the voice-over</label>
+      <label>Voice volume <input type="range" id="voiceVolume" min="0" max="1.5" step="0.05" value="1"></label>
+
+      <h2>Music & look</h2>
       <label>Music
         <select id="mood">
           <option value="calm">Generated · Calm</option>
@@ -65,7 +84,13 @@
       <p class="hint" id="musicName" hidden></p>
       <label>Music volume <input type="range" id="volume" min="0" max="1" step="0.05" value="0.6"></label>
       <label class="check"><input type="checkbox" id="captions" checked> Show narration as captions</label>
-      <label class="check"><input type="checkbox" id="voice"> Read narration aloud in preview <span class="hint">(preview only)</span></label>
+      <label>Font
+        <select id="font">
+          <option value="modern">Modern</option>
+          <option value="rounded">Rounded (great for kids)</option>
+          <option value="bold">Bold (great for teens)</option>
+        </select>
+      </label>
     </section>
 
     <section class="panel stage">
@@ -84,7 +109,10 @@
       </div>
       <div class="export">
         <h2>3. Export</h2>
-        <div class="row">
+        <div class="row three">
+          <label>Resolution
+            <select id="resolution"><option value="720p">720p HD</option><option value="1080p" selected>1080p Full HD</option></select>
+          </label>
           <label>Frame rate
             <select id="fps"><option>24</option><option selected>30</option><option>60</option></select>
           </label>
@@ -92,7 +120,10 @@
             <select id="bitrate"><option value="4000000">Standard</option><option value="8000000" selected>High</option><option value="16000000">Very high</option></select>
           </label>
         </div>
-        <button class="primary" id="exportBtn" disabled>⬇ Export video</button>
+        <div class="row">
+          <button class="primary" id="exportBtn" disabled>⬇ Export video</button>
+          <button class="ghost" id="thumbBtn" disabled title="1280×720 PNG of the title scene for YouTube">🖼 Thumbnail</button>
+        </div>
         <div class="progress" id="progress" hidden><div id="progressBar"></div></div>
         <p class="hint" id="exportMsg">Export records the video in real time; keep this tab visible while it renders.</p>
         <div id="downloads"></div>
@@ -124,7 +155,19 @@
         <label class="wide">Heading <input data-f="heading"></label>
         <label class="wide">Subtext <input data-f="subtext"></label>
         <label class="wide" data-show="bullets">Bullets (one per line) <textarea data-f="bullets" rows="3"></textarea></label>
-        <label class="wide">Narration / caption <textarea data-f="narration" rows="2"></textarea></label>
+        <label class="wide">Narration / voice-over <textarea data-f="narration" rows="2"></textarea></label>
+        <div class="wide voice-row">
+          <label>Speaker <select data-f="speaker"></select></label>
+          <span class="vo-status"></span>
+          <span class="vo-actions">
+            <button type="button" data-act="voGen" title="Generate voice-over">🔊</button>
+            <button type="button" data-act="voPlay" title="Play voice-over">▶</button>
+            <button type="button" data-act="voRec" title="Record your own voice">🎙</button>
+            <button type="button" data-act="voUpload" title="Upload an audio file">⬆</button>
+            <button type="button" data-act="voClear" title="Remove voice-over">✕</button>
+            <input type="file" accept="audio/*" data-f="voFile" hidden>
+          </span>
+        </div>
         <label>Layout <select data-f="layout"></select></label>
         <label>Duration (s) <input data-f="duration" type="number" min="1" max="30" step="0.5"></label>
         <label>Background <select data-f="background"></select></label>
@@ -139,6 +182,23 @@
     </article>
   </template>
 
+  <template id="castTpl">
+    <div class="cast">
+      <div class="cast-head">
+        <input data-c="name" aria-label="Character name">
+        <button type="button" data-act="test" title="Test this voice">▶</button>
+        <button type="button" data-act="del" title="Remove character">✕</button>
+      </div>
+      <label>Character preset <select data-c="preset"></select></label>
+      <label>Voice <select data-c="voice"></select></label>
+      <div class="row">
+        <label>Effect <select data-c="effect"></select></label>
+        <label>Speed <input type="range" data-c="speed" min="0.7" max="1.4" step="0.05"></label>
+      </div>
+    </div>
+  </template>
+
   <script type="module" src="js/app.js"></script>
 </body>
 </html>
+

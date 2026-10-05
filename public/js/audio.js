@@ -35,32 +35,66 @@ export class Soundtrack {
   /**
    * Start playback at `offset` seconds into a video of `duration` seconds.
    * `destinations` are AudioNodes (speakers, MediaStreamDestination, ...).
+   * `voices` are voice-over clips [{ buffer: AudioBuffer, at: seconds }]; music
+   * is ducked under them so speech stays clear.
    * Returns the AudioContext time that corresponds to video time `offset`.
    */
-  start({ mood, duration, offset = 0, volume = 0.6, destinations }) {
+  start({ mood, duration, offset = 0, volume = 0.6, voices = [], voiceVolume = 1, duck = 0.3, destinations }) {
     const ctx = this.ensureContext();
     this.stop();
     const when = ctx.currentTime + 0.05;
+    const at = (t) => when + t - offset;
+    const endAt = at(duration);
+
     const master = ctx.createGain();
-    master.gain.value = volume;
-    // fade out over the last 1.5 seconds
-    const endAt = when + (duration - offset);
-    master.gain.setValueAtTime(volume, Math.max(when, endAt - 1.5));
-    master.gain.linearRampToValueAtTime(0, endAt);
     destinations.forEach((d) => master.connect(d));
     this.master = master;
+
+    // music bus: ducking under voice-over + fade out over the last 1.5 s
+    const music = ctx.createGain();
+    music.connect(master);
+    const g = music.gain;
+    g.setValueAtTime(this.musicLevel(offset, voices, volume, duck), when);
+    for (const v of voices) {
+      const s = v.at, e = v.at + v.buffer.duration;
+      if (e < offset) continue;
+      if (s - 0.25 > offset) { g.setValueAtTime(volume, at(s - 0.25)); g.linearRampToValueAtTime(volume * duck, at(s)); }
+      g.setValueAtTime(volume * duck, at(e)); g.linearRampToValueAtTime(volume, at(e + 0.4));
+    }
+    const fadeFrom = Math.max(when, endAt - 1.5);
+    g.cancelScheduledValues(fadeFrom); g.setValueAtTime(this.musicLevel(Math.max(offset, duration - 1.5), voices, volume, duck), fadeFrom);
+    g.linearRampToValueAtTime(0, endAt);
 
     if (mood === "custom" && this.customBuffer) {
       const src = ctx.createBufferSource();
       src.buffer = this.customBuffer; src.loop = true;
-      src.connect(master);
+      src.connect(music);
       src.start(when, offset % this.customBuffer.duration);
       src.stop(endAt + 0.05);
       this.nodes.push(src);
     } else if (MOODS[mood]) {
-      this.schedule(MOODS[mood], duration, offset, when, master);
+      this.schedule(MOODS[mood], duration, offset, when, music);
+    }
+
+    // voice-over bus
+    const voice = ctx.createGain();
+    voice.gain.value = voiceVolume;
+    voice.connect(master);
+    for (const v of voices) {
+      const skip = offset - v.at;
+      if (skip >= v.buffer.duration) continue;
+      const src = ctx.createBufferSource();
+      src.buffer = v.buffer;
+      src.connect(voice);
+      if (skip > 0) src.start(when, skip); else src.start(at(v.at));
+      this.nodes.push(src);
     }
     return when;
+  }
+
+  /** Music gain at video time t (ducked if a voice clip is playing). */
+  musicLevel(t, voices, volume, duck) {
+    return voices.some((v) => t >= v.at - 0.25 && t <= v.at + v.buffer.duration + 0.4) ? volume * duck : volume;
   }
 
   stop() {
@@ -68,6 +102,10 @@ export class Soundtrack {
     this.nodes = [];
     this.master?.disconnect();
     this.master = null;
+  }
+
+  async decode(arrayBuffer) {
+    return this.ensureContext().decodeAudioData(arrayBuffer);
   }
 
   schedule(m, duration, offset, when, out) {

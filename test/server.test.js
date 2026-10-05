@@ -15,7 +15,10 @@ before(async () => {
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => server.close());
+after(async () => {
+  server.close();
+  (await import("../lib/tts.js")).kokoro.stop();
+});
 
 test("GET /api/status reports capabilities", async () => {
   const res = await fetch(`${base}/api/status`);
@@ -44,6 +47,30 @@ test("POST /api/storyboard falls back to a template without an API key", async (
 test("GET / serves the app", async () => {
   const res = await fetch(base);
   assert.match(await res.text(), /AI Video Generator/);
+});
+
+test("GET /api/voices lists providers, effects and presets", async () => {
+  const body = await (await fetch(`${base}/api/voices`)).json();
+  assert.equal(typeof body.providers.kokoro, "boolean");
+  assert.ok(body.effects.some((e) => e.id === "none"));
+  assert.ok(body.presets.length > 5);
+});
+
+test("POST /api/tts rejects empty text and unknown voices", async () => {
+  const post = (body) => fetch(`${base}/api/tts`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal((await post({ text: "", voice: "kokoro:af_heart" })).status, 400);
+  assert.equal((await post({ text: "hi", voice: "nope:x" })).status, 400);
+});
+
+const { providers } = await import("../lib/tts.js");
+test("POST /api/tts synthesizes speech with Kokoro and an effect", { skip: !providers().kokoro && "Kokoro not installed (npm run setup:voices)", timeout: 120000 }, async () => {
+  const res = await fetch(`${base}/api/tts`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: "Hello friends!", voice: "kokoro:af_sky", effect: "kid" }),
+  });
+  assert.equal(res.status, 200);
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert.ok(buf.length > 5000, `audio is ${buf.length} bytes`);
 });
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;

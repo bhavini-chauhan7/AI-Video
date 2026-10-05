@@ -2,8 +2,14 @@
 // so preview, seeking and export all draw the exact same thing.
 
 export const SIZES = { "16:9": [1280, 720], "9:16": [720, 1280], "1:1": [1080, 1080] };
+const SCALE = { "720p": 1, "1080p": 1.5 };
 const TRANSITION = 0.7; // seconds
-const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Color Emoji", sans-serif';
+const BASE_FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans Devanagari", "Noto Color Emoji", sans-serif';
+export const FONT_FAMILIES = {
+  modern: BASE_FONT,
+  rounded: `"Baloo 2", ${BASE_FONT}`,
+  bold: `"Poppins", ${BASE_FONT}`,
+};
 
 const clamp = (v, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v));
 const easeOut = (p) => 1 - Math.pow(1 - p, 3);
@@ -47,13 +53,16 @@ export class VideoRenderer {
     this.ctx = canvas.getContext("2d");
     this.storyboard = null;
     this.images = new Map();
-    this.options = { captions: true };
+    this.options = { captions: true, resolution: "720p" };
+    this.font = BASE_FONT;
     this.onImageLoad = null;
   }
 
   setStoryboard(storyboard) {
     this.storyboard = storyboard;
-    const [w, h] = SIZES[storyboard.aspectRatio] || SIZES["16:9"];
+    const k = storyboard.aspectRatio === "1:1" ? 1 : SCALE[this.options.resolution] || 1;
+    const [w, h] = (SIZES[storyboard.aspectRatio] || SIZES["16:9"]).map((v) => Math.round(v * k));
+    this.font = FONT_FAMILIES[storyboard.font] || BASE_FONT;
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     let start = 0;
     this.timeline = storyboard.scenes.map((scene, index) => {
@@ -231,7 +240,7 @@ export class VideoRenderer {
     const { ctx } = this;
     if (!str) return 0;
     ctx.save();
-    ctx.font = `${italic ? "italic " : ""}${weight} ${size}px ${FONT}`;
+    ctx.font = `${italic ? "italic " : ""}${weight} ${size}px ${this.font}`;
     ctx.textAlign = align; ctx.textBaseline = "top";
     let content = str;
     if (anim === "typewriter") content = str.slice(0, Math.floor((chars ?? 1) * str.length));
@@ -272,7 +281,7 @@ export class VideoRenderer {
       // measure, then draw vertically centered
       ctx.save();
       const heights = blocks.map((b) => {
-        ctx.font = `${b.italic ? "italic " : ""}${b.weight ?? 700} ${b.size}px ${FONT}`;
+        ctx.font = `${b.italic ? "italic " : ""}${b.weight ?? 700} ${b.size}px ${this.font}`;
         return b.text ? wrapLines(ctx, b.text, maxW).length * b.size * (b.lineHeight ?? 1.18) + (b.gap ?? m * 0.03) : (b.h ?? 0);
       });
       ctx.restore();
@@ -363,7 +372,7 @@ export class VideoRenderer {
     const text = chunks[idx];
     const size = m * 0.034;
     ctx.save();
-    ctx.font = `600 ${size}px ${FONT}`;
+    ctx.font = `600 ${size}px ${this.font}`;
     const lines = wrapLines(ctx, text, W * 0.8);
     const lh = size * 1.35, padX = size * 0.8, padY = size * 0.5;
     const boxW = Math.max(...lines.map((l) => ctx.measureText(l).width)) + padX * 2;
