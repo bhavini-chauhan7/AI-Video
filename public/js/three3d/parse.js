@@ -71,7 +71,7 @@ export function lookToSpec(appearance = "", { name = "", voiceStyle = "" } = {})
   const spec = { kind, name };
 
   // hair
-  spec.hair = has(text, "curly", "curls", "afro") ? "curly" : has(text, "pigtail") ? "pigtails" : has(text, "braid") ? "braids" : has(text, "ponytail") ? "ponytail"
+  spec.hair = has(text, "tuft", "single curl", "little curl") ? "tuft" : has(text, "curly", "curls", "afro") ? "curly" : has(text, "pigtail") ? "pigtails" : has(text, "braid") ? "braids" : has(text, "ponytail") ? "ponytail"
     : has(text, "bun\\b") ? "bun" : has(text, "spiky") ? "spiky" : has(text, "messy") ? "messy" : has(text, "long (?:[\\w-]+ )?hair") ? "long" : has(text, "bald") ? "bald"
       : kind === "grandpa" ? "grandpa" : kind === "girl" ? ["pigtails", "ponytail", "curly", "long"][Math.floor(r() * 4)] : kind === "woman" || kind === "grandma" ? ["bun", "long", "curly"][Math.floor(r() * 3)] : "short";
   spec.hairColor = colorOf(text, ["hair", "curls", "pigtails", "ponytail", "braids", "bun"]) || (kind === "grandpa" || kind === "grandma" ? "#e9ecef" : ["#5a3a1e", "#2b2b2b", "#8b5a2b", "#f1d27a", "#d9692a"][Math.floor(r() * 5)]);

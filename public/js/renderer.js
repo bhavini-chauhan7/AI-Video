@@ -566,6 +566,11 @@ export class VideoRenderer {
       if (!words.length || words.at(-1).word !== s.word) words.push({ word: s.word, parts: [] });
       words.at(-1).parts.push(s);
     });
+    for (const w of words) {
+      if (w.parts.length > 1 && w.parts.every((p) => p.text.replace(/[^\p{L}\p{N}]/gu, "").length <= 1)) {
+        w.parts = w.parts.map((p, i) => (i < w.parts.length - 1 ? { ...p, text: `${p.text}-` } : p));
+      }
+    }
     const space = ctx.measureText(" ").width;
     const lines = [[]];
     let lineW = 0;

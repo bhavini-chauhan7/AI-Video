@@ -147,6 +147,17 @@ function addHair(head, spec, r) {
   const style = spec.hair;
   const k = r / 0.5;
   if (style === "bald") return;
+  if (style === "tuft") {
+    // a toddler's tiny tuft: three soft little spikes on top
+    for (const [x, z, rz] of [[-0.06, 0.04, 0.35], [0.02, 0.06, 0], [0.09, 0.02, -0.4]]) {
+      const c = cone(0.06 * k, 0.2 * k, hair, 12);
+      c.position.set(x * k, r * 0.98, z * k);
+      c.rotation.z = rz;
+      head.add(c);
+    }
+    head.add(ball(0.12 * k, hair, 0, r * 0.88, 0.05 * k, 1.4, 0.45, 1.2));
+    return;
+  }
   if (style === "grandpa") {
     for (const side of [-1, 1]) head.add(ball(0.17 * k, hair, side * 0.42 * k, 0.02, -0.08 * k, 0.8, 1, 1));
     return;

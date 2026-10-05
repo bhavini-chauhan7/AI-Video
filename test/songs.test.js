@@ -64,3 +64,13 @@ test("songStoryboard builds a spoken intro, sung lines on the beat, and an outro
   assert.deepEqual(sb.cast.map((c) => c.name), ["Mr. Moon", "Lily"]);
   assert.ok(sb.scenes.every((s) => s.visual), "every scene has a 3D description");
 });
+
+test("Old MacDonald has three animal verses, each sung by its own character", async () => {
+  const { displayLyrics } = await import("../public/js/song.js");
+  const sb = normalizeStoryboard(songStoryboard("oldmacdonald"));
+  const singers = new Set(sb.scenes.filter((s) => s.layout === "lyrics").map((s) => s.speaker));
+  assert.deepEqual([...singers].sort(), ["Benny", "Daisy the Cow", "Old MacDonald", "Penny the Pig", "Quacky the Duck"]);
+  for (const sound of ["moo", "oink", "quack"]) assert.ok(sb.scenes.some((s) => s.narration.includes(`${sound} ${sound} here`)), sound);
+  assert.ok(sb.scenes.some((s) => s.heading === "E-I-E-I-O!"));
+  assert.equal(displayLyrics("Twin-kle, ev-ery-where E-I-E-I-O!"), "Twinkle, everywhere E-I-E-I-O!");
+});

@@ -131,7 +131,7 @@ export function buildSet(kind, { night = false, boat: withBoat = false, seed = "
   const rand = rng(kind + seed);
   const info = { group, night, floor: 0, kind };
 
-  const daySky = () => group.add(sky("#7cc6fe", "#d9f0ff"));
+  const daySky = () => group.add(sky("#3fb0ff", "#c4ecff")); // bright, saturated kids'-show sky
   const nightSky = () => { group.add(sky("#0b1440", "#3b2f7a")); stars(group, 260, rand); };
   const sunOrMoon = () => {
     if (night) group.add(sph(1.6, "#fff4c2", 14, 14, -40, { emissive: "#fff4c2", emissiveIntensity: 1 }));
@@ -250,9 +250,9 @@ export function buildSet(kind, { night = false, boat: withBoat = false, seed = "
     }
     case "farm": {
       night ? nightSky() : daySky(); sunOrMoon();
-      group.add(ground(night ? "#3a7d44" : "#8bd17c"));
+      group.add(ground(night ? "#3a7d44" : "#6fd04f"));
       // rolling hills
-      for (let i = 0; i < 6; i++) { const h = sph(8 + rand() * 6, night ? "#2f6f3a" : "#74c365", -30 + i * 12, -6, -30 - rand() * 8, { roughness: 1 }); h.castShadow = false; group.add(h); }
+      for (let i = 0; i < 6; i++) { const h = sph(8 + rand() * 6, night ? "#2f6f3a" : "#4fbf3a", -30 + i * 12, -6, -30 - rand() * 8, { roughness: 1 }); h.castShadow = false; group.add(h); }
       // red barn
       const barn = new THREE.Group();
       barn.add(box(4, 3, 3.2, "#d62828", 0, 1.5, 0));
@@ -266,7 +266,9 @@ export function buildSet(kind, { night = false, boat: withBoat = false, seed = "
       for (const y of [0.35, 0.65]) group.add(box(12.6, 0.08, 0.06, "#f5ebe0", 6.85, y, -5));
       for (let i = 0; i < 6; i++) group.add(tree(8 + rand() * 10, -9 - rand() * 6, 0.9 + rand() * 0.6));
       for (let i = 0; i < 5; i++) group.add(cloud(-20 + i * 10, 10 + rand() * 3, -32, 1.5));
-      flowers(group, rand, 45);
+      flowers(group, rand, 80);
+      // hay bales and a little pond for extra farm charm
+      for (const [x, z] of [[4.2, -3.2], [5.3, -3.6]]) { const hay = cyl(0.45, 0.45, 0.7, "#f2c14e", x, 0.45, z, 20); hay.rotation.z = Math.PI / 2; group.add(hay); }
       break;
     }
     default: {

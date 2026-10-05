@@ -1,6 +1,6 @@
 import { VideoRenderer } from "./renderer.js";
 import { Soundtrack, encodeWav } from "./audio.js";
-import { buildNotes, totalBeats } from "./song.js";
+import { buildNotes, totalBeats, displayLyrics } from "./song.js";
 import { sceneCast as sharedSceneCast } from "./cast.js";
 import { lookToSpec } from "./three3d/parse.js";
 import { portrait } from "./three3d/portrait.js";
@@ -141,7 +141,7 @@ function fitSongDurations() {
     if (notes.length) {
       sc.layout = "lyrics";
       sc.duration = Math.round(totalBeats(notes) * beat * 1000) / 1000;
-      sc.narration = sc.lyrics.replace(/-/g, "");
+      sc.narration = displayLyrics(sc.lyrics);
     } else {
       if (sc.layout === "lyrics") sc.layout = "title";
       sc.duration = Math.round(Math.max(1, Math.ceil(sc.duration / bar - 0.05)) * bar * 1000) / 1000;
@@ -173,7 +173,7 @@ function compositionPlan() {
       singer?.description || "warm friendly singer", "ukulele, glockenspiel, light percussion", `${Math.round(song.bpm)} bpm`, ...known],
     negative_global_styles: ["explicit lyrics", "heavy distortion", "screaming", "dark mood"],
     sections: storyboard.scenes.map((sc, i) => isSung(sc)
-      ? { section_name: `Line ${i}`, positive_local_styles: ["sung"], negative_local_styles: [], duration_ms: Math.round(sc.duration * 1000), lines: [sc.lyrics.replace(/-/g, "")] }
+      ? { section_name: `Line ${i}`, positive_local_styles: ["sung"], negative_local_styles: [], duration_ms: Math.round(sc.duration * 1000), lines: [displayLyrics(sc.lyrics)] }
       : { section_name: i === 0 ? "Intro" : i === storyboard.scenes.length - 1 ? "Outro" : `Break ${i}`, positive_local_styles: ["instrumental"], negative_local_styles: ["vocals"], duration_ms: Math.round(sc.duration * 1000), lines: [] }),
   };
 }
@@ -197,7 +197,7 @@ function aceLyrics() {
   storyboard.scenes.forEach((sc, i) => {
     if (isSung(sc)) {
       if (!section) { section = `[Verse ${++verse}]`; out.push(section); }
-      out.push(sc.lyrics.replace(/-/g, ""));
+      out.push(displayLyrics(sc.lyrics));
     } else {
       section = null;
       out.push(i === 0 ? "[Intro]" : i === storyboard.scenes.length - 1 ? "[Outro]" : "[Instrumental]", "");
@@ -1002,7 +1002,7 @@ function onField(i, f, input) {
     const { error } = s.lyrics && s.melody ? buildNotes(s.lyrics, s.melody) : { error: "" };
     const card = input.closest(".scene");
     card.querySelector(".melody-warn").textContent = error;
-    if (s.lyrics) s.heading = s.lyrics.replace(/-/g, "");
+    if (s.lyrics) s.heading = displayLyrics(s.lyrics);
     fitSongDurations();
     const sung = isSung(s);
     card.querySelector("[data-show=talk]").hidden = sung;

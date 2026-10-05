@@ -12,6 +12,17 @@ const NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
 
 export const midiName = (m) => `${NAMES[m % 12]}${Math.floor(m / 12) - 1}`;
 
+/**
+ * Lyrics as shown on screen: syllable hyphens removed ("twin-kle" -> "twinkle"),
+ * but kept between single letters ("E-I-E-I-O" stays "E-I-E-I-O").
+ */
+export function displayLyrics(lyrics) {
+  return String(lyrics || "").split(/(\s+)/).map((w) => {
+    const parts = w.split(/-(?=.)/);
+    return parts.length > 1 && parts.every((p) => p.replace(/[^\p{L}\p{N}]/gu, "").length <= 1) ? parts.join("-") : parts.join("");
+  }).join("");
+}
+
 /** Split lyrics into syllables: [{ text, word }]. Punctuation stays on the syllable for display. */
 export function syllables(lyrics) {
   const out = [];
