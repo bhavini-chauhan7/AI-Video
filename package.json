@@ -1,0 +1,31 @@
+{
+  "name": "ai-video-generator",
+  "version": "1.0.0",
+  "description": "AI video generator: describe a video, get an editable storyboard, render and export it in the browser",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bhavini-chauhan7/AI-Video.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/bhavini-chauhan7/AI-Video/issues"
+  },
+  "homepage": "https://github.com/bhavini-chauhan7/AI-Video#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "zod": "^4.6.5"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}

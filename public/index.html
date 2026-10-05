@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Video Generator</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🎬 <strong>AI Video Generator</strong></div>
+    <div class="status" id="status">Checking server…</div>
+    <div class="topbar-actions">
+      <button class="ghost" id="newBtn" title="Start a new video">New</button>
+      <button class="ghost" id="loadBtn" title="Open a saved project file">Open</button>
+      <button class="ghost" id="saveBtn" title="Download this project as JSON">Save</button>
+      <input type="file" id="loadInput" accept="application/json,.json" hidden>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel create">
+      <h2>1. Describe your video</h2>
+      <form id="promptForm">
+        <textarea id="prompt" rows="5" placeholder="e.g. A 30-second promo for a neighborhood coffee shop that roasts its own beans and opens at 6am" required></textarea>
+        <div class="chips" id="examples"></div>
+        <div class="row">
+          <label>Length
+            <select id="duration">
+              <option value="15">15 sec</option>
+              <option value="30" selected>30 sec</option>
+              <option value="45">45 sec</option>
+              <option value="60">1 min</option>
+              <option value="90">1.5 min</option>
+            </select>
+          </label>
+          <label>Format
+            <select id="aspect">
+              <option value="16:9">16:9 Landscape</option>
+              <option value="9:16">9:16 Vertical</option>
+              <option value="1:1">1:1 Square</option>
+            </select>
+          </label>
+        </div>
+        <label>Style / tone (optional)
+          <input id="style" placeholder="e.g. warm and cozy, bold tech, playful for kids">
+        </label>
+        <button type="submit" class="primary" id="generateBtn">✨ Generate storyboard</button>
+        <p class="notice" id="notice" hidden></p>
+      </form>
+
+      <h2>Audio & captions</h2>
+      <label>Music
+        <select id="mood">
+          <option value="calm">Generated · Calm</option>
+          <option value="upbeat">Generated · Upbeat</option>
+          <option value="epic">Generated · Epic</option>
+          <option value="playful">Generated · Playful</option>
+          <option value="none">No music</option>
+          <option value="custom">Upload my own…</option>
+        </select>
+      </label>
+      <input type="file" id="musicInput" accept="audio/*" hidden>
+      <p class="hint" id="musicName" hidden></p>
+      <label>Music volume <input type="range" id="volume" min="0" max="1" step="0.05" value="0.6"></label>
+      <label class="check"><input type="checkbox" id="captions" checked> Show narration as captions</label>
+      <label class="check"><input type="checkbox" id="voice"> Read narration aloud in preview <span class="hint">(preview only)</span></label>
+    </section>
+
+    <section class="panel stage">
+      <h2>2. Preview <span class="title-pill" id="videoTitle"></span></h2>
+      <div class="canvas-wrap" id="canvasWrap">
+        <canvas id="canvas" width="1280" height="720"></canvas>
+        <div class="empty" id="empty">
+          <p>Describe a video and press <b>Generate</b>.<br>Or start from a blank storyboard.</p>
+          <button id="blankBtn" class="ghost">Start blank</button>
+        </div>
+      </div>
+      <div class="transport">
+        <button id="playBtn" class="icon" title="Play / pause (space)">▶</button>
+        <input type="range" id="seek" min="0" max="1" step="0.01" value="0">
+        <span class="time" id="time">0:00 / 0:00</span>
+      </div>
+      <div class="export">
+        <h2>3. Export</h2>
+        <div class="row">
+          <label>Frame rate
+            <select id="fps"><option>24</option><option selected>30</option><option>60</option></select>
+          </label>
+          <label>Quality
+            <select id="bitrate"><option value="4000000">Standard</option><option value="8000000" selected>High</option><option value="16000000">Very high</option></select>
+          </label>
+        </div>
+        <button class="primary" id="exportBtn" disabled>⬇ Export video</button>
+        <div class="progress" id="progress" hidden><div id="progressBar"></div></div>
+        <p class="hint" id="exportMsg">Export records the video in real time; keep this tab visible while it renders.</p>
+        <div id="downloads"></div>
+      </div>
+    </section>
+
+    <section class="panel scenes">
+      <div class="scenes-head">
+        <h2>Scenes <span class="hint" id="sceneCount"></span></h2>
+        <button class="ghost" id="addScene">+ Add scene</button>
+      </div>
+      <div id="sceneList"></div>
+    </section>
+  </main>
+
+  <template id="sceneTpl">
+    <article class="scene">
+      <header>
+        <button class="jump" title="Jump to this scene"><span class="num"></span> <span class="label"></span></button>
+        <span class="dur"></span>
+        <div class="scene-actions">
+          <button data-act="up" title="Move up">↑</button>
+          <button data-act="down" title="Move down">↓</button>
+          <button data-act="dup" title="Duplicate">⧉</button>
+          <button data-act="del" title="Delete">✕</button>
+        </div>
+      </header>
+      <div class="fields">
+        <label class="wide">Heading <input data-f="heading"></label>
+        <label class="wide">Subtext <input data-f="subtext"></label>
+        <label class="wide" data-show="bullets">Bullets (one per line) <textarea data-f="bullets" rows="3"></textarea></label>
+        <label class="wide">Narration / caption <textarea data-f="narration" rows="2"></textarea></label>
+        <label>Layout <select data-f="layout"></select></label>
+        <label>Duration (s) <input data-f="duration" type="number" min="1" max="30" step="0.5"></label>
+        <label>Background <select data-f="background"></select></label>
+        <label>Transition in <select data-f="transition"></select></label>
+        <label>Text animation <select data-f="textAnimation"></select></label>
+        <label>Emoji <input data-f="emoji" maxlength="8"></label>
+        <label class="colors">Colors
+          <span><input type="color" data-f="color0"><input type="color" data-f="color1"><input type="color" data-f="accent" title="Accent"></span>
+        </label>
+        <label>Image <span class="img-row"><input type="file" accept="image/*" data-f="image"><button type="button" data-act="clearImg" hidden>Remove</button></span></label>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
