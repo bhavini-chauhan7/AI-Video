@@ -22,7 +22,8 @@ export class Soundtrack {
 
   ensureContext() {
     this.ctx ??= new AudioContext();
-    if (this.ctx.state === "suspended") this.ctx.resume();
+    const offline = typeof OfflineAudioContext !== "undefined" && this.ctx instanceof OfflineAudioContext;
+    if (!offline && this.ctx.state === "suspended") this.ctx.resume();
     return this.ctx;
   }
 
@@ -44,7 +45,7 @@ export class Soundtrack {
   start({ mood, duration, offset = 0, volume = 0.6, voices = [], voiceVolume = 1, duck = 0.3, song = null, track = null, destinations }) {
     const ctx = this.ensureContext();
     this.stop();
-    const when = ctx.currentTime + 0.05;
+    const when = ctx.currentTime + (typeof OfflineAudioContext !== "undefined" && ctx instanceof OfflineAudioContext ? 0 : 0.05);
     const at = (t) => when + t - offset;
     const endAt = at(duration);
 
@@ -167,6 +168,22 @@ export class Soundtrack {
     return voices.some((v) => t >= v.at - 0.25 && t <= v.at + v.buffer.duration + 0.4) ? volume * duck : volume;
   }
 
+  /**
+   * Render the same mix offline (faster than real time) and return an AudioBuffer.
+   * Takes the same options as start(), minus destinations.
+   */
+  async renderOffline(options, sampleRate = 32000) {
+    const live = this.ctx, liveNodes = this.nodes, liveMaster = this.master, liveNoise = this.noiseBuf;
+    const ctx = new OfflineAudioContext(1, Math.ceil((options.duration - (options.offset || 0) + 0.3) * sampleRate), sampleRate);
+    this.ctx = ctx; this.nodes = []; this.master = null; this.noiseBuf = null;
+    try {
+      this.start({ ...options, destinations: [ctx.destination] });
+      return await ctx.startRendering();
+    } finally {
+      this.ctx = live; this.nodes = liveNodes; this.master = liveMaster; this.noiseBuf = liveNoise;
+    }
+  }
+
   stop() {
     this.nodes.forEach((n) => { try { n.stop(); } catch { /* already stopped */ } });
     this.nodes = [];
@@ -268,4 +285,25 @@ export class Soundtrack {
     input.connect(out); input.connect(conv); conv.connect(wet); wet.connect(out);
     return input;
   }
+}
+
+/** Encode an AudioBuffer as 16-bit PCM mono WAV. */
+export function encodeWav(buffer) {
+  const n = buffer.length, sr = buffer.sampleRate;
+  const mono = new Float32Array(n);
+  for (let c = 0; c < buffer.numberOfChannels; c++) {
+    const d = buffer.getChannelData(c);
+    for (let i = 0; i < n; i++) mono[i] += d[i] / buffer.numberOfChannels;
+  }
+  let peak = 0;
+  for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(mono[i]));
+  const k = peak > 0.99 ? 0.99 / peak : 1;
+  const out = new DataView(new ArrayBuffer(44 + n * 2));
+  const str = (o, s) => [...s].forEach((ch, i) => out.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, "RIFF"); out.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+  out.setUint32(24, sr, true); out.setUint32(28, sr * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+  str(36, "data"); out.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) out.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, Math.round(mono[i] * k * 32767))), true);
+  return new Blob([out.buffer], { type: "audio/wav" });
 }

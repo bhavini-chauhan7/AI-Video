@@ -27,12 +27,41 @@ Click **🎵 Song / nursery rhyme**, pick a song, press **Generate**, then **�
 
 - **Classic rhymes (free, no API key needed):** Twinkle Twinkle Little Star, Mary Had a Little Lamb, London Bridge, Row Row Row Your Boat and Old MacDonald. All use traditional, public-domain lyrics and melodies.
 - **Original songs:** Claude writes the lyrics *and* the melody, and repeats the chorus so kids learn it. This needs `ANTHROPIC_API_KEY`. Original songs are better for a monetized channel than rhymes everyone uses.
-- **Built-in singer (free, offline):** each syllable is spoken by a Kokoro voice, then the WORLD vocoder re-times it to the beat and tunes it to the melody note, with vibrato. It sounds like a friendly synthetic singer, in the style of Vocaloid, rather than a human. The character effects work while singing too: kid, chipmunk, robot, monster and more.
+- **ACE-Step AI singer (free, open source, human-like):** the recommended singer. The app records a guide of your song (melody and backing, on the beat), and [ACE-Step 1.5](https://github.com/ace-step/ACE-Step-1.5) re-sings it with a natural voice and real-sounding instruments. It keeps the melody and timing, so the karaoke stays in sync. ACE-Step is MIT-licensed, so it's free for monetized channels. See [Setting up ACE-Step](#setting-up-ace-step) below.
+- **Built-in singer (free, offline, synthetic):** a Kokoro voice is turned into singing with the WORLD vocoder. It's always in tune and on the beat, but it sounds like a synthetic singer. It's also used to make ACE-Step's guide recording.
 - **Backing music:** chords are worked out from the melody automatically, and the arrangement is ukulele strums, bass, a bell doubling the tune, and light drums.
 - **Karaoke lyrics:** each syllable lights up as it's sung, with a bouncing ball, so kids can sing along.
 - **Edit anything:** tempo, key, the lyrics and the melody. Melodies use simple note text (`C4 C4 G4 G4 A4 A4 G4:2`; `:2` means two beats, `R` is a rest), and the app warns you if the syllable and note counts don't match.
 - **ElevenLabs Music (paid, optional):** with `ELEVENLABS_API_KEY` set, choose "ElevenLabs Music" and click **Compose** to get a studio-quality song with real-sounding vocals. Each scene becomes one section of the song, so the lyrics stay in sync. ElevenLabs writes its own arrangement, so a classic rhyme's tune may not match the traditional one exactly.
 - **Your own voice:** you can always record 🎙 yourself singing any line.
+
+## Setting up ACE-Step
+
+ACE-Step runs as a separate program next to this app. Most people only need to do this once.
+
+1. **Install it** (pick your computer):
+   - **Windows:** download the [portable package](https://files.acemusic.ai/acemusic/win/ACE-Step-1.5.7z), unzip it, and run `start_api_server.bat`.
+   - **Mac (Apple Silicon M1–M4):** download the [portable package](https://files.acemusic.ai/acemusic/mac/ACE-Step-1.5.zip), unzip it, and run `start_api_server_macos.sh`.
+   - **Linux, or any computer with Python:**
+     ```bash
+     curl -LsSf https://astral.sh/uv/install.sh | sh
+     git clone https://github.com/ace-step/ACE-Step-1.5.git && cd ACE-Step-1.5
+     uv sync
+     uv run acestep-api
+     ```
+2. **Wait for the first start.** It downloads its models once (several GB) and then listens on `http://localhost:8001`.
+3. **Restart this app** (`npm start`). The Song panel's **Singing engine** shows "ACE-Step AI singer", and new songs use it automatically.
+4. **Sing:** make your song, then press **🎤 Sing it with ACE-Step**. The **Follow the melody** slider controls how closely it sticks to the original tune: higher means closer, lower gives it more freedom.
+
+**Speed:**
+
+| Computer | Time per song |
+|---|---|
+| NVIDIA graphics card (4 GB+ video memory) | Seconds |
+| Apple Silicon Mac | Under a minute |
+| Ordinary computer without a graphics card | Works, but can take several minutes |
+
+**No suitable computer?** Run ACE-Step on a rented cloud GPU and point the app at it with `ACESTEP_URL=https://your-server:8001`. If you set an `ACESTEP_API_KEY` on that server, set the same key here.
 
 ## Voices
 
@@ -68,7 +97,7 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | **Text animation** | fade, slide-up, typewriter, pop |
 | **Music** | generated in the browser to match the mood (calm, upbeat, epic, playful), or your own audio file |
 | **Audiences** | little kids, kids, teens, Gen Z and everyone, each with its own writing style, pacing, fonts, music and narrator |
-| **Songs** | 5 classic nursery rhymes plus AI-written originals; free built-in singer or ElevenLabs Music; karaoke lyrics; auto-harmonized backing |
+| **Songs** | 5 classic nursery rhymes plus AI-written originals; human-like ACE-Step singer, free built-in singer, or ElevenLabs Music; karaoke lyrics; auto-harmonized backing |
 | **Voice-over** | multi-character cast, 46 free voices plus ElevenLabs and OpenAI, character effects, mic recording, music ducking under speech |
 | **Captions** | narration shown as subtitles, timed across each scene |
 | **Fonts** | modern, rounded (Baloo 2, also covers Hindi script), bold (Poppins) |
@@ -87,6 +116,9 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | `KOKORO_DIR` | `./models` | Where the Kokoro model files live |
 | `ELEVENLABS_API_KEY` | none | Enables ElevenLabs voices (`ELEVENLABS_MODEL`, default `eleven_multilingual_v2`) and ElevenLabs Music (`ELEVENLABS_MUSIC_MODEL`, default `music_v1`) |
 | `OPENAI_API_KEY` | none | Enables OpenAI voices (`OPENAI_TTS_MODEL`, default `gpt-4o-mini-tts`) |
+| `ACESTEP_URL` | `http://127.0.0.1:8001` | ACE-Step API server used for the human-like singer |
+| `ACESTEP_API_KEY` | none | Key for an ACE-Step server started with `ACESTEP_API_KEY` |
+| `ACESTEP_STEPS` | `8` | ACE-Step inference steps (turbo model: 8 is recommended) |
 
 ## How it works
 
@@ -97,6 +129,7 @@ prompt + audience ─ POST /api/storyboard ▶ Claude → storyboard + cast JSON
 storyboard editor ◀─────────────────────  (template fallback if no key / API error)
 scene narration ─── POST /api/tts ───────▶ Kokoro / ElevenLabs / OpenAI → ffmpeg effects → MP3
 sung line ───────── POST /api/sing ──────▶ Kokoro syllables → WORLD vocoder (pitch + timing) → MP3
+guide recording ─── POST /api/song-ace ───▶ ACE-Step "cover" → human-like sung song
 whole song ──────── POST /api/song-track ▶ ElevenLabs Music (optional)
 canvas renderer (pure function of time) + Web Audio mix (voices + ducked music)
 MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg → H.264 MP4
@@ -106,6 +139,7 @@ MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg
 - `lib/storyboard.js`: the storyboard schema (including cast and audiences), normalization or clamping of any input, and the offline template generator.
 - `lib/voices.js`: the voice catalog, character presets and ffmpeg effect chains.
 - `lib/tts.js`: the TTS engines (a persistent Kokoro Python worker, plus ElevenLabs and OpenAI), singing, ElevenLabs Music, effects and a cache. `tts/kokoro_worker.py` is the worker, and `tts/singer.py` turns speech into singing.
+- `lib/acestep.js`: the ACE-Step client (cover task, polling, download).
 - `lib/songs.js`: the nursery-rhyme songbook. `public/js/song.js` holds the melody parser, syllable matching and auto-harmonizer, and is shared by the server and the browser.
 - `public/js/renderer.js`: draws any frame at time `t`. Preview, seeking and export all go through the same code path.
 - `public/js/audio.js`: the procedural music engine (pads, bass, arpeggios, drums, reverb), uploaded-track playback, and the voice-over bus with music ducking.

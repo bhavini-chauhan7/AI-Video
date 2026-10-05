@@ -11,6 +11,7 @@ import { fallbackStoryboard, normalizeStoryboard, ASPECT_RATIOS, AUDIENCES } fro
 import { songList, songStoryboard } from "./lib/songs.js";
 import { synthesize, sing, composeSong, listVoices, providers, availableEffects, hasFfmpeg, FFMPEG, kokoro } from "./lib/tts.js";
 import { PRESETS, presetVoice } from "./lib/voices.js";
+import { acestepAvailable, acestepCover } from "./lib/acestep.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,9 +20,12 @@ export const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/api/status", (_req, res) => {
+app.get("/api/status", async (_req, res) => {
   const p = providers();
-  res.json({ ai: hasApiKey(), model: hasApiKey() ? MODEL : null, mp4: hasFfmpeg, tts: p.kokoro || p.openai || p.elevenlabs, singing: p.singing, music: p.music });
+  res.json({
+    ai: hasApiKey(), model: hasApiKey() ? MODEL : null, mp4: hasFfmpeg, tts: p.kokoro || p.openai || p.elevenlabs,
+    singing: p.singing, music: p.music, acestep: await acestepAvailable(),
+  });
 });
 
 /** Give every cast member a concrete voice based on its voiceStyle and the voices this server has. */
@@ -57,6 +61,23 @@ const audioRoute = (fn) => async (req, res) => {
 };
 app.post("/api/sing", audioRoute(({ notes, bpm, voice, effect, transpose }) => sing({ notes, bpm, voice, effect, transpose })));
 app.post("/api/song-track", audioRoute(({ plan }) => composeSong(plan)));
+
+const guideUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 80 * 1024 * 1024 } });
+app.post("/api/song-ace", guideUpload.single("guide"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No guide track uploaded." });
+    if (!(await acestepAvailable())) {
+      return res.status(503).json({ error: "ACE-Step isn't running. Start it (see README: ACE-Step) or set ACESTEP_URL." });
+    }
+    let params = {};
+    try { params = JSON.parse(req.body?.params || "{}"); } catch { return res.status(400).json({ error: "Bad parameters." }); }
+    const { audio, type } = await acestepCover(req.file.buffer, req.file.mimetype, params);
+    res.type(type).send(audio);
+  } catch (err) {
+    console.error("/api/song-ace failed:", err.message);
+    res.status(502).json({ error: err.message.slice(0, 400) });
+  }
+});
 
 app.post("/api/tts", async (req, res) => {
   try {

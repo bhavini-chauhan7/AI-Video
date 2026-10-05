@@ -1,5 +1,5 @@
 import { VideoRenderer } from "./renderer.js";
-import { Soundtrack } from "./audio.js";
+import { Soundtrack, encodeWav } from "./audio.js";
 import { buildNotes, totalBeats } from "./song.js";
 
 const OPTIONS = {
@@ -106,7 +106,8 @@ function sanitizeSong(song) {
   const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Number.isFinite(Number(v)) ? Number(v) : d));
   const out = {
     id: String(song.id || "custom"), bpm: n(song.bpm, 40, 220, 100), beatsPerBar: n(song.beatsPerBar, 2, 6, 4),
-    key: n(song.key, 0, 11, 0), transpose: n(song.transpose, -12, 12, 0), engine: song.engine === "elevenlabs" ? "elevenlabs" : "builtin",
+    key: n(song.key, 0, 11, 0), transpose: n(song.transpose, -12, 12, 0), engine: ["elevenlabs", "acestep"].includes(song.engine) ? song.engine : "builtin",
+    coverStrength: n(song.coverStrength, 0, 1, 0.6),
   };
   const tr = song.track;
   if (tr && typeof tr.audio === "string" && tr.audio.startsWith("data:audio/")) out.track = { id: uid(), audio: tr.audio, duration: Number(tr.duration) || 0, key: String(tr.key || "") };
@@ -163,31 +164,109 @@ function compositionPlan() {
       : { section_name: i === 0 ? "Intro" : i === storyboard.scenes.length - 1 ? "Outro" : `Break ${i}`, positive_local_styles: ["instrumental"], negative_local_styles: ["vocals"], duration_ms: Math.round(sc.duration * 1000), lines: [] }),
   };
 }
-const planKey = () => JSON.stringify(compositionPlan());
-const useTrack = () => storyboard?.song?.engine === "elevenlabs";
-const trackFresh = () => useTrack() && storyboard.song.track && storyboard.song.track.key === planKey();
+const ENGINE_NAMES = { elevenlabs: "ElevenLabs", acestep: "ACE-Step" };
+const singerOf = () => castFor(storyboard.scenes.find(isSung) || storyboard.scenes[0]);
+/** Everything that changes the produced song; a track made from different inputs is stale. */
+function trackKey() {
+  const song = storyboard.song;
+  if (song.engine === "elevenlabs") return JSON.stringify(compositionPlan());
+  const s = singerOf();
+  return JSON.stringify(["acestep", song.bpm, song.transpose, song.coverStrength ?? 0.6, storyboard.audience, s?.voice, s?.effect, s?.description,
+    storyboard.scenes.map((sc) => [sc.lyrics, sc.melody, sc.duration])]);
+}
+const useTrack = () => !!storyboard?.song && storyboard.song.engine !== "builtin";
+const trackFresh = () => useTrack() && storyboard.song.track && storyboard.song.track.key === trackKey();
+
+/** ACE-Step lyrics: sung lines grouped into sections, with structure tags. */
+function aceLyrics() {
+  const out = [];
+  let section = null, verse = 0;
+  storyboard.scenes.forEach((sc, i) => {
+    if (isSung(sc)) {
+      if (!section) { section = `[Verse ${++verse}]`; out.push(section); }
+      out.push(sc.lyrics.replace(/-/g, ""));
+    } else {
+      section = null;
+      out.push(i === 0 ? "[Intro]" : i === storyboard.scenes.length - 1 ? "[Outro]" : "[Instrumental]", "");
+    }
+  });
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function aceCaption() {
+  const s = singerOf();
+  const who = { "little-kids": "for toddlers and preschoolers", kids: "for kids", teens: "for teens", "young-adults": "for young adults" }[storyboard.audience] || "family friendly";
+  // Kokoro ids encode gender in the second letter (af_ = female, am_ = male)
+  const id = (s?.voice || "").split(":")[1] || "";
+  const male = id ? id[1] === "m" : /\b(male|man|boy|grandpa|santa|giant)\b/i.test(`${s?.description} ${s?.voiceStyle}`);
+  const kid = s?.effect === "kid" || /little-kid|little-boy/.test(s?.voiceStyle || "");
+  const voice = kid ? `cute young child ${male ? "boy" : "girl"} lead vocal` : male ? "warm gentle male lead vocal" : "sweet clear gentle female lead vocal";
+  return [`children's nursery rhyme ${who}`, voice, "soft, warm, natural human singing", "ukulele, glockenspiel, light acoustic percussion", "cheerful, cozy, sing-along",
+    s?.description].filter(Boolean).join(", ");
+}
+
+/** The built-in performance (singer + backing, on the beat) that ACE-Step re-sings. */
+async function renderGuide() {
+  if (serverStatus.singing) {
+    const missing = storyboard.scenes.map((sc, i) => i).filter((i) => isSung(storyboard.scenes[i]) && voState(i)[0] !== "ok");
+    for (const [n, i] of missing.entries()) {
+      $("songHint").textContent = `Preparing the guide melody: singing line ${n + 1} of ${missing.length}…`;
+      const sc = storyboard.scenes[i];
+      await setVoiceover(i, await requestSing(sc, castFor(sc)), "sing");
+    }
+  }
+  await ensureBuffers();
+  let start = 0;
+  const voices = [];
+  for (const sc of storyboard.scenes) {
+    const b = isSung(sc) && sc.voiceover && buffers.get(sc.voiceover.id);
+    if (b) voices.push({ buffer: b, at: start, duck: false });
+    start += sc.duration;
+  }
+  const buf = await soundtrack.renderOffline({ mood: "playful", duration: totalDuration(), offset: 0, volume: 0.45, voices, voiceVolume: 1.1, song: songTimeline() });
+  return encodeWav(buf);
+}
 
 async function composeTrack() {
+  const song = storyboard.song;
   const btn = $("songTrackBtn");
-  const short = storyboard.scenes.find((sc) => sc.duration < 3);
-  if (short) return showNotice("ElevenLabs needs every scene to be at least 3 seconds. Slow the tempo or lengthen short scenes.", "error");
+  if (song.engine === "elevenlabs" && storyboard.scenes.some((sc) => sc.duration < 3)) {
+    return showNotice("ElevenLabs needs every scene to be at least 3 seconds. Slow the tempo or lengthen short scenes.", "error");
+  }
+  if (song.engine === "acestep" && totalDuration() < 10) return showNotice("ACE-Step needs a song of at least 10 seconds.", "error");
   pause();
-  btn.disabled = true; btn.textContent = "🎵 Composing… (this can take a minute)";
+  btn.disabled = true;
+  btn.textContent = song.engine === "acestep" ? "🎤 Singing… (first time can take several minutes)" : "🎵 Composing… (this can take a minute)";
   try {
-    const key = planKey();
-    const res = await fetch("/api/song-track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan: JSON.parse(key) }) });
+    const key = trackKey();
+    let res;
+    if (song.engine === "acestep") {
+      const guide = await renderGuide();
+      $("songHint").textContent = "ACE-Step is singing your song…";
+      const tsig = song.beatsPerBar === 3 && storyboard.scenes.some((sc) => /:1\.5\b/.test(sc.melody || "")) ? "6" : String(song.beatsPerBar);
+      const form = new FormData();
+      form.append("guide", guide, "guide.wav");
+      form.append("params", JSON.stringify({
+        caption: aceCaption(), lyrics: aceLyrics(), bpm: song.bpm, keyScale: `${KEYS[((song.key + song.transpose) % 12 + 12) % 12]} Major`,
+        timeSignature: tsig, duration: Math.round(totalDuration() * 100) / 100, language: (storyboard.language || "en").slice(0, 2), strength: song.coverStrength ?? 0.6,
+      }));
+      res = await fetch("/api/song-ace", { method: "POST", body: form });
+    } else {
+      res = await fetch("/api/song-track", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plan: JSON.parse(key) }) });
+    }
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `Composing failed (${res.status})`);
     const blob = await res.blob();
     const buffer = await soundtrack.decode(await blob.arrayBuffer());
     const track = { id: uid(), audio: await blobToDataURL(blob), duration: buffer.duration, key };
     buffers.set(track.id, buffer);
     storyboard.song.track = track;
-    save(); updateSongPanel();
+    save(); updateSceneHeaders(); updateSongPanel();
     play();
   } catch (err) {
     showNotice(err.message, "error");
   } finally {
-    btn.disabled = false; btn.textContent = "🎵 Compose the song with ElevenLabs";
+    btn.disabled = false;
+    updateSongPanel();
   }
 }
 
@@ -201,11 +280,17 @@ function updateSongPanel() {
   $("keyLabel").textContent = `${KEYS[((song.key + song.transpose) % 12 + 12) % 12]} (${song.transpose > 0 ? "+" : ""}${song.transpose})`;
   $("songEngine").value = song.engine;
   $("songEngine").querySelector("[value=elevenlabs]").disabled = !serverStatus.music;
-  $("songTrackBtn").hidden = song.engine !== "elevenlabs";
-  $("songHint").textContent = song.engine === "elevenlabs"
-    ? (trackFresh() ? "✓ Song composed. Spoken scenes still use the cast voices." : "Compose the song after you finish editing lyrics and timing. ElevenLabs writes its own arrangement, so the tune may differ from the traditional one.")
-    : serverStatus.singing ? "The singer follows the melody exactly, and the backing music is harmonized automatically."
-      : "Singing needs the free voice engine (npm run setup:voices). You can still record 🎙 yourself singing each line.";
+  $("songEngine").querySelector("[value=acestep]").disabled = !serverStatus.acestep;
+  $("songTrackBtn").hidden = song.engine === "builtin";
+  if (!$("songTrackBtn").disabled) $("songTrackBtn").textContent = song.engine === "acestep" ? "🎤 Sing it with ACE-Step" : "🎵 Compose the song with ElevenLabs";
+  $("strengthRow").hidden = song.engine !== "acestep";
+  $("strength").value = song.coverStrength ?? 0.6;
+  $("songHint").textContent = song.engine === "acestep"
+    ? (trackFresh() ? "✓ Sung by ACE-Step. Spoken scenes still use the cast voices." : "ACE-Step re-sings the built-in version with a natural, human-like voice, keeping the melody and timing. Press the button after you finish editing.")
+    : song.engine === "elevenlabs"
+      ? (trackFresh() ? "✓ Song composed. Spoken scenes still use the cast voices." : "Compose the song after you finish editing lyrics and timing. ElevenLabs writes its own arrangement, so the tune may differ from the traditional one.")
+      : serverStatus.singing ? "Free synthetic singer that follows the melody exactly. For a human-like voice, choose ACE-Step."
+        : "Singing needs the free voice engine (npm run setup:voices). You can still record 🎙 yourself singing each line.";
 }
 
 function save() {
@@ -277,7 +362,7 @@ const voKey = (scene) => {
 function voState(i) {
   const s = storyboard.scenes[i];
   if (busy.has(i)) return ["busy", isSung(s) ? "singing…" : "generating…"];
-  if (isSung(s) && useTrack()) return trackFresh() ? ["ok", "🎵 in ElevenLabs song"] : ["stale", "compose the song"];
+  if (isSung(s) && useTrack()) return trackFresh() ? ["ok", `🎵 in ${ENGINE_NAMES[storyboard.song.engine]} song`] : ["stale", storyboard.song.engine === "acestep" ? "press “Sing it with ACE-Step”" : "compose the song"];
   if (!s.voiceover) return ["", s.narration.trim() ? "no voice yet" : "no narration"];
   const generated = s.voiceover.source === "tts" || s.voiceover.source === "sing";
   const label = `${s.voiceover.source === "sing" ? "🎵" : generated ? "✓" : "🎙"} ${s.voiceover.duration.toFixed(1)}s`;
@@ -328,7 +413,7 @@ async function requestSing(scene, member) {
 async function generateVoice(i) {
   const scene = storyboard.scenes[i];
   const sung = isSung(scene);
-  if (sung && useTrack()) throw new Error("With ElevenLabs Music, the sung lines come from the composed song. Use “Compose the song”.");
+  if (sung && useTrack()) throw new Error(`With ${ENGINE_NAMES[storyboard.song.engine]}, the sung lines come from the produced song. Use the button in the Song panel.`);
   if (!sung && !scene.narration.trim()) throw new Error(`Scene ${i + 1} has no narration to speak.`);
   const member = castFor(scene);
   if (!member.voice) throw new Error(`Pick a voice for ${member.name} first.`);
@@ -345,7 +430,7 @@ async function generateAllVoices() {
     const generated = s.voiceover && (s.voiceover.source === "tts" || s.voiceover.source === "sing");
     return (isSung(s) || s.narration.trim()) && (!s.voiceover || (generated && s.voiceover.key !== voKey(s)));
   });
-  if (!todo.length) { $("voiceProgress").textContent = useTrack() && !trackFresh() ? "Voices are ready. Now compose the song with ElevenLabs." : "All scenes already have up-to-date voice-overs."; return; }
+  if (!todo.length) { $("voiceProgress").textContent = useTrack() && !trackFresh() ? `Voices are ready. Now press the ${ENGINE_NAMES[storyboard.song.engine]} button in the Song panel.` : "All scenes already have up-to-date voice-overs."; return; }
   pause();
   btn.disabled = true;
   let failed = 0;
@@ -734,7 +819,9 @@ async function generate(e) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
     if (data.notice) showNotice(data.notice);
-    setStoryboard(sanitize(data.storyboard));
+    const sb = sanitize(data.storyboard);
+    if (sb.song && serverStatus.acestep && sb.song.engine === "builtin") sb.song.engine = "acestep"; // human-like singer when available
+    setStoryboard(sb);
     $("voiceProgress").textContent = serverStatus.tts ? `Next: press “${storyboard.song ? "Generate singing & voices" : "Generate all voice-overs"}”.` : "";
     play();
   } catch (err) {
@@ -891,6 +978,7 @@ $("transpose").addEventListener("input", (e) => { storyboard.song.transpose = +e
 $("transpose").addEventListener("change", restartIfPlaying);
 $("songEngine").addEventListener("change", (e) => { storyboard.song.engine = e.target.value; updateSongPanel(); changed(); restartIfPlaying(); });
 $("songTrackBtn").addEventListener("click", composeTrack);
+$("strength").addEventListener("change", (e) => { storyboard.song.coverStrength = +e.target.value; updateSongPanel(); updateSceneHeaders(); save(); });
 $("examples").append(...EXAMPLES.map(([ex, a, type = "talk"]) => {
   const b = document.createElement("button"); b.type = "button"; b.textContent = (type === "song" ? "🎵 " : "") + (ex.length > 36 ? ex.slice(0, 34) + "…" : ex); b.title = ex;
   b.addEventListener("click", () => {
