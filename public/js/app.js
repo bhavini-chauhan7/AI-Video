@@ -75,6 +75,7 @@ function sanitize(sb) {
   const cast = (Array.isArray(sb.cast) && sb.cast.length ? sb.cast : defaultCast()).map((c) => ({
     name: String(c.name || "Narrator"), description: String(c.description || ""), voiceStyle: String(c.voiceStyle || ""),
     voice: String(c.voice || ""), effect: String(c.effect || "none"), speed: Math.min(1.6, Math.max(0.6, Number(c.speed) || 1)),
+    appearance: String(c.appearance || ""), ...(/^\/media\/[\w-]+\.(png|jpe?g|webp)$/i.test(c.image || "") ? { image: c.image } : {}),
   }));
   return {
     title: String(sb.title || "Untitled video"),
@@ -91,7 +92,8 @@ function sanitize(sb) {
       scene.bullets = Array.isArray(scene.bullets) ? scene.bullets.map(String) : [];
       scene.colors = Array.isArray(scene.colors) && scene.colors.length >= 2 ? scene.colors.slice(0, 2) : base.colors;
       scene.duration = Math.min(30, Math.max(1, Number(scene.duration) || 5));
-      for (const k of ["heading", "subtext", "narration", "emoji", "accent", "speaker", "lyrics", "melody"]) scene[k] = String(scene[k] ?? "");
+      for (const k of ["heading", "subtext", "narration", "emoji", "accent", "speaker", "lyrics", "melody", "visual"]) scene[k] = String(scene[k] ?? "");
+      if (!(scene.clip && /^\/media\/[\w-]+\.mp4$/.test(scene.clip.clip || ""))) delete scene.clip;
       if (!cast.some((c) => c.name === scene.speaker)) scene.speaker = cast[0].name;
       const vo = scene.voiceover;
       if (vo && typeof vo.audio === "string" && vo.audio.startsWith("data:audio/")) {
@@ -516,6 +518,171 @@ async function toggleRecord(i, btn) {
   setTimeout(() => recording?.recorder === recorder && recorder.stop(), 60000);
 }
 
+// ---------- 3D characters (fal.ai) ----------
+const busy3d = new Map(); // scene index -> step text
+
+async function pollJob(id, onStep) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const res = await fetch(`/api/jobs/${id}`);
+    const job = await res.json();
+    if (!res.ok) throw new Error(job.error || "Lost track of the job.");
+    if (job.status === "done") return job.result;
+    if (job.status === "error") throw new Error(job.error);
+    onStep?.(job.step);
+  }
+}
+
+async function startJob(url, init) {
+  const res = await fetch(url, init);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data.job;
+}
+
+async function designCharacter(member, onStep) {
+  const job = await startJob("/api/3d/character", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: member.name, appearance: member.appearance }),
+  });
+  const result = await pollJob(job, onStep);
+  member.image = result.image;
+  member.imageKey = member.appearance;
+  save(); renderCast();
+}
+
+const STOP = new Set(["the", "mr", "mrs", "ms", "miss", "little", "big", "old", "and", "character", "narrator", "singer"]);
+/** Does the scene text mention this character (any distinctive word of its name, e.g. "moon" for "Mr. Moon")? */
+function mentions(text, c) {
+  const words = c.name.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
+  return words.length ? words.some((w) => new RegExp(`\\b${w}`, "iu").test(text)) : text.toLowerCase().includes(c.name.toLowerCase());
+}
+
+/**
+ * Characters in a scene, main one first: the character(s) the description is
+ * about, then the speaker (whose mouth moves) if not already included.
+ */
+function sceneCast(scene) {
+  const speaker = castFor(scene);
+  const text = `${scene.visual} ${scene.heading}`;
+  const named = storyboard.cast.filter((c) => mentions(text, c));
+  // order by where they appear in the description
+  named.sort((a, b) => text.toLowerCase().search(a.name.toLowerCase().split(" ").pop()) - text.toLowerCase().search(b.name.toLowerCase().split(" ").pop()));
+  if (!named.length) return [speaker];
+  return named.includes(speaker) ? [speaker, ...named.filter((c) => c !== speaker)] : [...named, speaker];
+}
+
+const clipKey = (scene) => JSON.stringify([scene.visual, scene.heading, storyboard.aspectRatio, $("lipsync").checked && sceneHasVoice(scene) ? voiceKeyFor(scene) : "",
+  sceneCast(scene).map((c) => [c.name, c.image, c.appearance])]);
+const sceneHasVoice = (scene) => !!(scene.voiceover || (isSung(scene) && trackFresh()));
+const voiceKeyFor = (scene) => (isSung(scene) && trackFresh() ? storyboard.song.track.key : scene.voiceover?.key || scene.voiceover?.id || "");
+
+function clipState(i) {
+  const s = storyboard.scenes[i];
+  if (busy3d.has(i)) return ["busy", `🎬 ${busy3d.get(i)}`];
+  if (!s.clip) return ["", serverStatus.fal ? "no 3D clip yet" : ""];
+  if (s.clip.key !== clipKey(s)) return ["stale", "🎬 3D clip · needs update"];
+  return ["ok", `🎬 3D clip ✓${s.clip.lipsync ? " · lip-synced" : ""}`];
+}
+
+/** The scene's voice as a WAV, starting at the scene start (what the lips should follow). */
+async function sceneAudio(i) {
+  await ensureBuffers();
+  const scene = storyboard.scenes[i];
+  const start = sceneStart(i);
+  if (isSung(scene) && trackFresh()) {
+    const track = buffers.get(storyboard.song.track.id);
+    const sr = track.sampleRate, a = Math.floor(start * sr), n = Math.max(1, Math.floor(scene.duration * sr));
+    const ctx = new OfflineAudioContext(1, n, sr);
+    const out = ctx.createBuffer(1, n, sr);
+    for (let c = 0; c < track.numberOfChannels; c++) {
+      const src = track.getChannelData(c).subarray(a, a + n), dst = out.getChannelData(0);
+      for (let k = 0; k < src.length; k++) dst[k] += src[k] / track.numberOfChannels;
+    }
+    return encodeWav(out);
+  }
+  const b = scene.voiceover && buffers.get(scene.voiceover.id);
+  if (!b) return null;
+  const lead = isSung(scene) ? 0 : VOICE_LEAD;
+  const buf = await soundtrack.renderOffline({ mood: "none", duration: scene.duration, offset: 0, voices: [{ buffer: b, at: lead, duck: false }], voiceVolume: 1 }, 24000);
+  return encodeWav(buf);
+}
+
+async function make3dScene(i, onStep) {
+  const scene = storyboard.scenes[i];
+  const cast = sceneCast(scene);
+  for (const c of cast) {
+    if (!c.image || c.imageKey !== c.appearance) { onStep?.(`designing ${c.name}…`); await designCharacter(c); }
+  }
+  const audio = $("lipsync").checked ? await sceneAudio(i) : null;
+  const form = new FormData();
+  form.append("params", JSON.stringify({
+    scene: { visual: scene.visual, heading: scene.heading }, speaker: cast[0].name, sung: isSung(scene),
+    characters: cast.map((c) => ({ name: c.name, appearance: c.appearance, image: c.image })), seconds: scene.duration, aspectRatio: storyboard.aspectRatio,
+  }));
+  if (audio) form.append("audio", audio, "voice.wav");
+  const key = clipKey(scene);
+  const job = await startJob("/api/3d/scene", { method: "POST", body: form });
+  const result = await pollJob(job, onStep);
+  scene.clip = { ...result, key };
+  save(); changed();
+}
+
+async function runScene3d(i) {
+  busy3d.set(i, "making 3D…"); updateSceneHeaders();
+  const status = () => document.querySelector(`#sceneList .scene[data-index="${i}"] .clip-status`);
+  try {
+    await make3dScene(i, (step) => {
+      busy3d.set(i, `${step}…`);
+      const el = status(); if (el) { el.className = "clip-status busy"; el.textContent = `🎬 ${step}…`; }
+    });
+  } finally {
+    busy3d.delete(i); updateSceneHeaders();
+  }
+}
+
+async function makeAll3d() {
+  const todo = storyboard.scenes.map((_, i) => i).filter((i) => clipState(i)[0] !== "ok");
+  if (!todo.length) { $("threeProgress").textContent = "Every scene already has an up-to-date 3D clip."; return; }
+  const newChars = new Set(todo.flatMap((i) => sceneCast(storyboard.scenes[i])).filter((c) => !c.image || c.imageKey !== c.appearance));
+  const est = await (await fetch("/api/3d/estimate", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ characters: newChars.size, scenes: todo.map((i) => ({ seconds: storyboard.scenes[i].duration, voice: $("lipsync").checked && sceneHasVoice(storyboard.scenes[i]) })) }),
+  })).json();
+  const noVoice = $("lipsync").checked && todo.some((i) => !sceneHasVoice(storyboard.scenes[i]) && (storyboard.scenes[i].narration || isSung(storyboard.scenes[i])));
+  if (!confirm(`Make ${todo.length} 3D scene(s)${newChars.size ? ` and design ${newChars.size} character(s)` : ""}?\n\n` +
+    `This costs about $${est.usd.toFixed(2)} on your fal.ai account and takes a few minutes per scene.` +
+    (noVoice ? "\n\nTip: generate the voices/singing first so the characters' lips can follow them." : ""))) return;
+  pause();
+  $("make3dBtn").disabled = true;
+  let done = 0, failed = 0;
+  const progress = () => ($("threeProgress").textContent = `Making 3D scenes: ${done} of ${todo.length} done${failed ? `, ${failed} failed` : ""}…`);
+  progress();
+  try {
+    // design the characters first (one at a time), then render up to 3 scenes at once
+    for (const c of newChars) {
+      $("threeProgress").textContent = `Designing ${c.name}…`;
+      await designCharacter(c);
+    }
+    progress();
+    const queue = [...todo];
+    const worker = async () => {
+      while (queue.length) {
+        const i = queue.shift();
+        try { await runScene3d(i); } catch (err) { failed++; showNotice(`Scene ${i + 1}: ${err.message}`, "error"); }
+        done++; progress();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    $("threeProgress").textContent = failed ? `Finished with ${failed} failed scene(s). Press the button again to retry them.` : "✓ Your 3D video is ready. Press play!";
+  } catch (err) {
+    showNotice(err.message, "error");
+    $("threeProgress").textContent = "";
+  } finally {
+    $("make3dBtn").disabled = !serverStatus.fal;
+  }
+}
+
 // ---------- cast editor ----------
 function voiceOptions(selected) {
   const groups = new Map();
@@ -548,6 +715,18 @@ function renderCast() {
     q("effect").innerHTML = catalog.effects.map((e) => `<option value="${e.id}">${esc(e.label)}</option>`).join("");
     q("effect").value = member.effect;
     q("speed").value = member.speed;
+    q("appearance").value = member.appearance || "";
+    if (member.image) { q("image").src = member.image; q("image").hidden = false; }
+    q("appearance").addEventListener("change", () => { member.appearance = q("appearance").value.trim(); save(); updateSceneHeaders(); });
+    const designBtn = el.querySelector("[data-act=design]");
+    designBtn.hidden = !serverStatus.fal;
+    designBtn.textContent = member.image ? "🎨 Redesign 3D character" : "🎨 Design 3D character";
+    designBtn.addEventListener("click", async () => {
+      if (!member.appearance) return showNotice(`Describe how ${member.name} looks first.`);
+      designBtn.disabled = true; designBtn.textContent = "🎨 Designing… (about a minute)";
+      try { member.imageKey = null; await designCharacter(member); updateSceneHeaders(); }
+      catch (err) { showNotice(err.message, "error"); designBtn.disabled = false; designBtn.textContent = "🎨 Design 3D character"; }
+    });
     q("speed").title = `${member.speed}×`;
 
     q("name").addEventListener("change", () => {
@@ -596,6 +775,7 @@ function castChanged() { updateSceneHeaders(); save(); }
 async function play() {
   if (!storyboard || player.exporting || player.playing) return;
   player.playing = true;
+  renderer.playing = true;
   $("playBtn").textContent = "❚❚";
   await ensureBuffers();
   if (!player.playing) return;
@@ -619,6 +799,7 @@ async function play() {
 
 function pause() {
   player.playing = false;
+  renderer.playing = player.exporting;
   cancelAnimationFrame(player.raf);
   soundtrack.stop();
   $("playBtn").textContent = "▶";
@@ -698,6 +879,17 @@ function renderScenes() {
       catch { showNotice("Couldn't read that audio file.", "error"); }
     });
     el.querySelector("[data-act=voClear]").addEventListener("click", () => { delete storyboard.scenes[i].voiceover; changed(); });
+    const make3d = el.querySelector("[data-act=make3d]");
+    make3d.hidden = !serverStatus.fal;
+    make3d.addEventListener("click", async () => {
+      const est = await (await fetch("/api/3d/estimate", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ characters: sceneCast(storyboard.scenes[i]).filter((c) => !c.image || c.imageKey !== c.appearance).length,
+          scenes: [{ seconds: storyboard.scenes[i].duration, voice: $("lipsync").checked && sceneHasVoice(storyboard.scenes[i]) }] }) })).json();
+      if (!confirm(`Make scene ${i + 1} in 3D? About $${est.usd.toFixed(2)} on fal.ai.`)) return;
+      pause();
+      try { await runScene3d(i); } catch (err) { showNotice(err.message, "error"); }
+    });
+    el.querySelector("[data-act=clear3d]").addEventListener("click", () => { delete storyboard.scenes[i].clip; changed(); });
     list.appendChild(el);
   });
   updateSceneHeaders();
@@ -717,6 +909,12 @@ function updateSceneHeaders() {
     el.querySelector(".num").textContent = i + 1;
     el.querySelector(".label").textContent = sceneLabel(s);
     el.querySelector(".dur").textContent = `${+s.duration.toFixed(1)}s`;
+    const [ccls, ctext] = clipState(i);
+    const cs = el.querySelector(".clip-status");
+    cs.className = `clip-status ${ccls}`; cs.textContent = ctext;
+    el.querySelector("[data-act=clear3d]").hidden = !s.clip;
+    const thumb = el.querySelector(".clip-thumb");
+    if (s.clip?.still) { if (thumb.getAttribute("src") !== s.clip.still) thumb.src = s.clip.still; thumb.hidden = false; } else thumb.hidden = true;
     const status = el.querySelector(".vo-status");
     if (recording?.index === i) return;
     const [cls, text] = voState(i);
@@ -847,6 +1045,7 @@ async function exportVideo() {
   const stale = storyboard.scenes.filter((s, i) => voState(i)[0] === "stale").length;
   if (stale && !confirm(`${stale} scene(s) have voice-overs that don't match the current text or voice. Export anyway?`)) return;
   player.exporting = true;
+  renderer.playing = true;
   const btn = $("exportBtn"), bar = $("progressBar");
   btn.disabled = true; $("generateBtn").disabled = true;
   $("progress").hidden = false; bar.style.width = "0";
@@ -900,6 +1099,8 @@ async function exportVideo() {
     $("exportMsg").textContent = `Export failed: ${err.message}`;
   } finally {
     player.exporting = false;
+    renderer.playing = false;
+    refresh();
     btn.disabled = false; $("generateBtn").disabled = false;
     setTimeout(() => ($("progress").hidden = true), 800);
   }
@@ -978,6 +1179,8 @@ $("transpose").addEventListener("input", (e) => { storyboard.song.transpose = +e
 $("transpose").addEventListener("change", restartIfPlaying);
 $("songEngine").addEventListener("change", (e) => { storyboard.song.engine = e.target.value; updateSongPanel(); changed(); restartIfPlaying(); });
 $("songTrackBtn").addEventListener("click", composeTrack);
+$("make3dBtn").addEventListener("click", makeAll3d);
+$("lipsync").addEventListener("change", () => storyboard && updateSceneHeaders());
 $("strength").addEventListener("change", (e) => { storyboard.song.coverStrength = +e.target.value; updateSongPanel(); updateSceneHeaders(); save(); });
 $("examples").append(...EXAMPLES.map(([ex, a, type = "talk"]) => {
   const b = document.createElement("button"); b.type = "button"; b.textContent = (type === "song" ? "🎵 " : "") + (ex.length > 36 ? ex.slice(0, 34) + "…" : ex); b.title = ex;
@@ -1061,6 +1264,10 @@ async function init() {
     $("status").innerHTML = status.ai
       ? `<span class="ok">●</span> AI scripts by Claude (${esc(status.model)})`
       : `<span class="off">●</span> Template mode: set ANTHROPIC_API_KEY on the server for AI-written storyboards`;
+    $("make3dBtn").disabled = !status.fal;
+    $("threeHint").textContent = status.fal
+      ? "Turns every scene into a 3D animated clip with your characters, and moves their mouths to the voices. Uses your fal.ai account (you'll see the price first)."
+      : "Add a fal.ai key (FAL_KEY) on the server to turn scenes into 3D animated clips with talking, singing characters. See README: 3D characters.";
     const engines = Object.entries(voices.providers).filter(([, on]) => on).map(([k]) => ({ kokoro: "Kokoro (free, offline)", openai: "OpenAI", elevenlabs: "ElevenLabs" })[k]);
     $("ttsHint").textContent = engines.length
       ? `${voices.voices.length} voices from ${engines.join(", ")}. Give each character its own voice and effect.`

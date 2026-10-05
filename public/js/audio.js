@@ -172,7 +172,14 @@ export class Soundtrack {
    * Render the same mix offline (faster than real time) and return an AudioBuffer.
    * Takes the same options as start(), minus destinations.
    */
-  async renderOffline(options, sampleRate = 32000) {
+  renderOffline(options, sampleRate = 32000) {
+    // renders temporarily swap this.ctx, so they must never overlap (3D scenes are made in parallel)
+    const run = () => this.renderOfflineNow(options, sampleRate);
+    this.renderQueue = (this.renderQueue || Promise.resolve()).then(run, run);
+    return this.renderQueue;
+  }
+
+  async renderOfflineNow(options, sampleRate) {
     const live = this.ctx, liveNodes = this.nodes, liveMaster = this.master, liveNoise = this.noiseBuf;
     const ctx = new OfflineAudioContext(1, Math.ceil((options.duration - (options.offset || 0) + 0.3) * sampleRate), sampleRate);
     this.ctx = ctx; this.nodes = []; this.master = null; this.noiseBuf = null;

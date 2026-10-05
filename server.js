@@ -12,6 +12,8 @@ import { songList, songStoryboard } from "./lib/songs.js";
 import { synthesize, sing, composeSong, listVoices, providers, availableEffects, hasFfmpeg, FFMPEG, kokoro } from "./lib/tts.js";
 import { PRESETS, presetVoice } from "./lib/voices.js";
 import { acestepAvailable, acestepCover } from "./lib/acestep.js";
+import { falAvailable, designCharacter, makeSceneClip, estimate, MEDIA_DIR, PRICES } from "./lib/fal3d.js";
+import { randomUUID } from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,12 +21,13 @@ const PORT = Number(process.env.PORT) || 3000;
 export const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+app.use("/media", express.static(MEDIA_DIR, { maxAge: "7d", immutable: true }));
 
 app.get("/api/status", async (_req, res) => {
   const p = providers();
   res.json({
     ai: hasApiKey(), model: hasApiKey() ? MODEL : null, mp4: hasFfmpeg, tts: p.kokoro || p.openai || p.elevenlabs,
-    singing: p.singing, music: p.music, acestep: await acestepAvailable(),
+    singing: p.singing, music: p.music, acestep: await acestepAvailable(), fal: falAvailable(),
   });
 });
 
@@ -61,6 +64,63 @@ const audioRoute = (fn) => async (req, res) => {
 };
 app.post("/api/sing", audioRoute(({ notes, bpm, voice, effect, transpose }) => sing({ notes, bpm, voice, effect, transpose })));
 app.post("/api/song-track", audioRoute(({ plan }) => composeSong(plan)));
+
+// ---------- 3D characters (fal.ai) ----------
+// Generation takes minutes, so it runs as background jobs the browser polls.
+const jobs = new Map();
+function startJob(work) {
+  const id = randomUUID();
+  const job = { id, status: "running", step: "starting", result: null, error: null, at: Date.now() };
+  jobs.set(id, job);
+  work((step) => { job.step = step; })
+    .then((result) => Object.assign(job, { status: "done", step: "done", result }))
+    .catch((err) => { console.error("3D job failed:", err?.body ? JSON.stringify(err.body).slice(0, 500) : err.message); Object.assign(job, { status: "error", error: friendlyFalError(err) }); });
+  // forget finished jobs after an hour
+  for (const [k, j] of jobs) if (Date.now() - j.at > 3600_000) jobs.delete(k);
+  return id;
+}
+function friendlyFalError(err) {
+  const status = err?.status;
+  if (status === 401 || status === 403) return "fal.ai rejected the key (check FAL_KEY).";
+  if (status === 402) return "Your fal.ai balance is too low. Add credit at fal.ai/dashboard/billing.";
+  if (status === 422) return `fal.ai could not use this input: ${JSON.stringify(err.body?.detail ?? err.body ?? "").slice(0, 200)}`;
+  return `3D generation failed: ${String(err?.message || err).slice(0, 300)}`;
+}
+const need3d = (res) => (falAvailable() ? false : (res.status(400).json({ error: "Set FAL_KEY on the server to make 3D characters (see README: 3D characters)." }), true));
+
+app.get("/api/jobs/:id", (req, res) => {
+  const job = jobs.get(req.params.id);
+  if (!job) return res.status(404).json({ error: "Unknown job (the server may have restarted)." });
+  res.json(job);
+});
+
+app.post("/api/3d/estimate", (req, res) => {
+  const scenes = (req.body?.scenes || []).slice(0, 60).map((s) => ({ seconds: Number(s.seconds) || 5, voice: !!s.voice }));
+  res.json({ usd: estimate({ scenes, characters: Number(req.body?.characters) || 0 }), prices: PRICES });
+});
+
+app.post("/api/3d/character", (req, res) => {
+  if (need3d(res)) return;
+  const name = String(req.body?.name || "").slice(0, 60), appearance = String(req.body?.appearance || "").slice(0, 600);
+  res.json({ job: startJob((onUpdate) => designCharacter({ name, appearance, onUpdate })) });
+});
+
+const sceneUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
+app.post("/api/3d/scene", sceneUpload.single("audio"), (req, res) => {
+  if (need3d(res)) return;
+  let p;
+  try { p = JSON.parse(req.body?.params || "{}"); } catch { return res.status(400).json({ error: "Bad parameters." }); }
+  const characters = (p.characters || []).slice(0, 6).map((c) => ({
+    name: String(c.name || "").slice(0, 60), appearance: String(c.appearance || "").slice(0, 600),
+    image: /^\/media\/[\w-]+\.(png|jpe?g|webp)$/i.test(c.image || "") ? c.image : null,
+  }));
+  const args = {
+    scene: { visual: String(p.scene?.visual || "").slice(0, 800), heading: String(p.scene?.heading || "").slice(0, 200) },
+    characters, speaker: String(p.speaker || ""), seconds: Number(p.seconds) || 5, aspectRatio: p.aspectRatio, sung: !!p.sung,
+    audio: req.file?.buffer, audioType: req.file?.mimetype,
+  };
+  res.json({ job: startJob((onUpdate) => makeSceneClip({ ...args, onUpdate })) });
+});
 
 const guideUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 80 * 1024 * 1024 } });
 app.post("/api/song-ace", guideUpload.single("guide"), async (req, res) => {

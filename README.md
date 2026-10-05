@@ -35,6 +35,44 @@ Click **🎵 Song / nursery rhyme**, pick a song, press **Generate**, then **�
 - **ElevenLabs Music (paid, optional):** with `ELEVENLABS_API_KEY` set, choose "ElevenLabs Music" and click **Compose** to get a studio-quality song with real-sounding vocals. Each scene becomes one section of the song, so the lyrics stay in sync. ElevenLabs writes its own arrangement, so a classic rhyme's tune may not match the traditional one exactly.
 - **Your own voice:** you can always record 🎙 yourself singing any line.
 
+## 3D characters
+
+Turn any video or song into a **3D animated cartoon**: cute characters that talk, sing and move, with **mouths synced to their voices**. This uses [fal.ai](https://fal.ai), one account that gives access to several AI models:
+
+| Step | Model | What it does |
+|---|---|---|
+| Design | FLUX.1 Kontext (text-to-image) | Draws each character once as a 3D cartoon, from its "Looks like" description |
+| Scene | FLUX.1 Kontext (image editing) | Puts *that same* character into each scene, so characters stay consistent |
+| Animate | Kling 2.1 image-to-video | Brings the scene to life as a 5- or 10-second clip |
+| Lip-sync | Kling LipSync | Moves the character's mouth to the scene's voice-over or singing |
+
+**Setup:**
+1. Create an account at [fal.ai](https://fal.ai), add credit, and create an API key under Dashboard → Keys.
+2. Start the app with `FAL_KEY=your-key npm start`.
+
+**Make a video:**
+1. Generate a storyboard as usual, then press **Generate singing & voices** (or **Generate all voice-overs**) so the lips have audio to follow.
+2. In **Voices & cast**, check each character's **Looks like** description. Optionally press **🎨 Design 3D character** to preview one.
+3. Edit **What happens (3D scene)** on any scene you like.
+4. Press **🎬 Make the 3D video**. You'll see the price first. Scenes render three at a time, a few minutes each.
+5. Play, then export as usual. The titles and karaoke lyrics move to the bottom of the screen so the characters stay visible.
+
+You can remake a single scene with its **🎬 Make 3D** button. A scene shows *needs update* when its description, characters or voice changed.
+
+**Cost** (approximate fal.ai prices; you're shown an estimate before anything is charged):
+
+| Item | Cost |
+|---|---|
+| Character design | $0.04 |
+| 5-second scene (still + animation + lip-sync) | ~$0.39 |
+| 10-second scene | ~$0.74 |
+| 40-second nursery rhyme | ~$3–5 |
+
+**Good to know:**
+- The character a scene is *about* (named in its description) is kept identical. Other characters are drawn from their descriptions, so they can vary a little between scenes.
+- Lip-sync needs a face the model can recognize. For a star, a teapot or a very stylized face it may be skipped, and the scene keeps its animation without lip-sync.
+- Clips and images are saved in `./media` and served by this app, so projects keep working after fal.ai's links expire.
+
 ## Setting up ACE-Step
 
 ACE-Step runs as a separate program next to this app. Most people only need to do this once.
@@ -101,6 +139,7 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | **Voice-over** | multi-character cast, 46 free voices plus ElevenLabs and OpenAI, character effects, mic recording, music ducking under speech |
 | **Captions** | narration shown as subtitles, timed across each scene |
 | **Fonts** | modern, rounded (Baloo 2, also covers Hindi script), bold (Poppins) |
+| **3D characters** | AI-generated 3D cartoon characters that stay consistent across scenes, animated clips, lip-sync to voices and singing (fal.ai) |
 | **Formats** | 1080p or 720p: landscape (YouTube), vertical (Shorts, Reels, TikTok), square; plus a thumbnail PNG |
 | **Projects** | autosaves in the browser; Save/Open lets you keep the project as a JSON file |
 
@@ -116,6 +155,8 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | `KOKORO_DIR` | `./models` | Where the Kokoro model files live |
 | `ELEVENLABS_API_KEY` | none | Enables ElevenLabs voices (`ELEVENLABS_MODEL`, default `eleven_multilingual_v2`) and ElevenLabs Music (`ELEVENLABS_MUSIC_MODEL`, default `music_v1`) |
 | `OPENAI_API_KEY` | none | Enables OpenAI voices (`OPENAI_TTS_MODEL`, default `gpt-4o-mini-tts`) |
+| `FAL_KEY` | none | Enables 3D characters through fal.ai (`FAL_VIDEO_MODEL`, `FAL_LIPSYNC_MODEL`, `FAL_STILL_MODEL`, `FAL_DESIGN_MODEL` override the models) |
+| `MEDIA_DIR` | `./media` | Where 3D character images and clips are stored |
 | `ACESTEP_URL` | `http://127.0.0.1:8001` | ACE-Step API server used for the human-like singer |
 | `ACESTEP_API_KEY` | none | Key for an ACE-Step server started with `ACESTEP_API_KEY` |
 | `ACESTEP_STEPS` | `8` | ACE-Step inference steps (turbo model: 8 is recommended) |
@@ -129,6 +170,7 @@ prompt + audience ─ POST /api/storyboard ▶ Claude → storyboard + cast JSON
 storyboard editor ◀─────────────────────  (template fallback if no key / API error)
 scene narration ─── POST /api/tts ───────▶ Kokoro / ElevenLabs / OpenAI → ffmpeg effects → MP3
 sung line ───────── POST /api/sing ──────▶ Kokoro syllables → WORLD vocoder (pitch + timing) → MP3
+3D scene ────────── POST /api/3d/scene ──▶ fal.ai: Kontext still → Kling animation → Kling lip-sync (background job)
 guide recording ─── POST /api/song-ace ───▶ ACE-Step "cover" → human-like sung song
 whole song ──────── POST /api/song-track ▶ ElevenLabs Music (optional)
 canvas renderer (pure function of time) + Web Audio mix (voices + ducked music)
@@ -139,6 +181,7 @@ MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg
 - `lib/storyboard.js`: the storyboard schema (including cast and audiences), normalization or clamping of any input, and the offline template generator.
 - `lib/voices.js`: the voice catalog, character presets and ffmpeg effect chains.
 - `lib/tts.js`: the TTS engines (a persistent Kokoro Python worker, plus ElevenLabs and OpenAI), singing, ElevenLabs Music, effects and a cache. `tts/kokoro_worker.py` is the worker, and `tts/singer.py` turns speech into singing.
+- `lib/fal3d.js`: the 3D character pipeline (design → scene still → animation → lip-sync) and cost estimates.
 - `lib/acestep.js`: the ACE-Step client (cover task, polling, download).
 - `lib/songs.js`: the nursery-rhyme songbook. `public/js/song.js` holds the melody parser, syllable matching and auto-harmonizer, and is shared by the server and the browser.
 - `public/js/renderer.js`: draws any frame at time `t`. Preview, seeking and export all go through the same code path.

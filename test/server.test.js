@@ -7,6 +7,7 @@ import path from "node:path";
 
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.ANTHROPIC_AUTH_TOKEN;
+delete process.env.FAL_KEY;
 const { app } = await import("../server.js");
 
 let server, base;
@@ -104,6 +105,12 @@ test("POST /api/sing sings a line", { skip: !providers().singing && "singing eng
 test("POST /api/sing rejects non-Kokoro voices", async () => {
   const res = await fetch(`${base}/api/sing`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ bpm: 100, voice: "openai:nova", notes: [{ text: "la", pitch: 60, beats: 1 }] }) });
   assert.equal(res.status, 400);
+});
+
+test("3D endpoints explain that FAL_KEY is needed", async () => {
+  const res = await fetch(`${base}/api/3d/character`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Lily", appearance: "a girl" }) });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /FAL_KEY/);
 });
 
 const hasFfmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;

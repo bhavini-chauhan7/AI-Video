@@ -56,6 +56,8 @@ export class VideoRenderer {
     this.storyboard = null;
     this.images = new Map();
     this.options = { captions: true, resolution: "720p" };
+    this.videos = new Map(); // clip url -> <video>
+    this.playing = false;     // true while previewing/exporting, so clips play instead of seeking
     this.font = BASE_FONT;
     this.onImageLoad = null;
   }
@@ -67,6 +69,7 @@ export class VideoRenderer {
     this.font = FONT_FAMILIES[storyboard.font] || BASE_FONT;
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     let start = 0;
+    for (const sc of storyboard.scenes) if (sc.clip?.clip) this.video(sc.clip.clip);
     this.timeline = storyboard.scenes.map((scene, index) => {
       const entry = { scene, index, start, end: start + scene.duration };
       start += scene.duration;
@@ -79,6 +82,30 @@ export class VideoRenderer {
       return entry;
     });
     this.duration = start;
+  }
+
+  video(url) {
+    if (!this.videos.has(url)) {
+      const v = document.createElement("video");
+      v.src = url; v.muted = true; v.playsInline = true; v.preload = "auto";
+      v.addEventListener("loadeddata", () => this.onImageLoad?.());
+      v.addEventListener("seeked", () => { if (!this.playing) this.onImageLoad?.(); });
+      this.videos.set(url, v);
+    }
+    return this.videos.get(url);
+  }
+
+  /** Keep a clip's playhead at scene time t (play along while previewing, seek while scrubbing). */
+  syncVideo(v, t) {
+    const target = Math.max(0, Math.min(t, (v.duration || 0) - 0.04));
+    if (this.playing && t < (v.duration || 0)) {
+      if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = target;
+      if (v.paused) v.play().catch(() => {});
+    } else {
+      if (!v.paused) v.pause();
+      if (Math.abs(v.currentTime - target) > 0.05) v.currentTime = target;
+    }
+    this.usedVideos.add(v);
   }
 
   sceneAt(t) {
@@ -94,6 +121,7 @@ export class VideoRenderer {
     t = clamp(t, 0, Math.max(0, this.duration - 1e-3));
     const cur = this.sceneAt(t);
     const local = t - cur.start;
+    this.usedVideos = new Set();
     ctx.save();
     ctx.clearRect(0, 0, W, H);
 
@@ -108,6 +136,7 @@ export class VideoRenderer {
     }
     if (this.options.captions && cur.scene.narration && cur.scene.layout !== "lyrics") this.drawCaption(cur.scene, local, W, H);
     ctx.restore();
+    for (const v of this.videos.values()) if (!this.usedVideos.has(v) && !v.paused) v.pause();
   }
 
   drawTransition(kind, p, W, H, drawA, drawB) {
@@ -142,10 +171,14 @@ export class VideoRenderer {
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
     this.drawBackground(scene, t, W, H, index);
-    const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
-    vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.45)");
-    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
-    this.drawContent(scene, t, W, H);
+    if (scene.clip?.clip) {
+      this.drawClipOverlay(scene, t, W, H);
+    } else {
+      const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+      vg.addColorStop(0, "rgba(0,0,0,0)"); vg.addColorStop(1, "rgba(0,0,0,0.45)");
+      ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+      this.drawContent(scene, t, W, H);
+    }
     ctx.restore();
   }
 
@@ -162,6 +195,27 @@ export class VideoRenderer {
     ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
     const rand = mulberry32(index * 977 + 13);
     const m = Math.min(W, H);
+
+    if (scene.clip?.clip) {
+      const v = this.video(scene.clip.clip);
+      this.syncVideo(v, t);
+      let frame = v.readyState >= 2 && v.videoWidth ? v : null;
+      if (!frame && scene.clip.still) {
+        // clip still loading, or this browser can't play it: show the scene's 3D still
+        if (!this.images.has(scene.clip.still)) {
+          const img = new Image(); img.onload = () => this.onImageLoad?.(); img.src = scene.clip.still;
+          this.images.set(scene.clip.still, img);
+        }
+        const img = this.images.get(scene.clip.still);
+        if (img.complete && img.naturalWidth) frame = img;
+      }
+      if (frame) {
+        const fw = frame.videoWidth || frame.naturalWidth, fh = frame.videoHeight || frame.naturalHeight;
+        const scale = Math.max(W / fw, H / fh);
+        ctx.drawImage(frame, (W - fw * scale) / 2, (H - fh * scale) / 2, fw * scale, fh * scale);
+        return;
+      }
+    }
 
     switch (scene.background) {
       case "image": {
@@ -367,6 +421,36 @@ export class VideoRenderer {
     }
   }
 
+  /** Text over a 3D clip: keep the characters visible, so text sits in the lower third. */
+  drawClipOverlay(scene, t, W, H) {
+    const { ctx } = this;
+    const m = Math.min(W, H);
+    if (scene.layout === "lyrics" && scene.lyrics && scene.melody) {
+      const g = ctx.createLinearGradient(0, H * 0.62, 0, H);
+      g.addColorStop(0, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.55)");
+      ctx.fillStyle = g; ctx.fillRect(0, H * 0.62, W, H * 0.38);
+      this.drawLyrics({ ...scene, emoji: "" }, t, W, H, { y: H * (H > W ? 0.8 : 0.84), scale: 0.78 });
+      return;
+    }
+    // a title card that fades out after a few seconds
+    const a = clamp(t / 0.4) * clamp((3.2 - t) / 0.5);
+    if (a <= 0 || !scene.heading) return;
+    ctx.save();
+    ctx.globalAlpha = a;
+    const size = m * (scene.layout === "title" || scene.layout === "closing" ? 0.08 : 0.06);
+    ctx.font = `800 ${size}px ${this.font}`;
+    const lines = wrapLines(ctx, scene.heading, W * 0.8);
+    const lh = size * 1.2, boxH = lines.length * lh + size * 0.6;
+    const y = H * (scene.layout === "title" ? 0.08 : 0.06);
+    const boxW = Math.max(...lines.map((l) => ctx.measureText(l).width)) + size * 1.2;
+    ctx.fillStyle = rgba(scene.accent, 0.85);
+    ctx.beginPath(); ctx.roundRect((W - boxW) / 2, y, boxW, boxH, size * 0.4); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.shadowColor = "rgba(0,0,0,0.3)"; ctx.shadowBlur = size * 0.15;
+    lines.forEach((l, i) => ctx.fillText(l, W / 2, y + size * 0.3 + i * lh));
+    ctx.restore();
+  }
+
   /** Sung syllables with start times (seconds into the scene), cached per lyrics+melody+tempo. */
   syllableTimes(scene) {
     const bpm = this.storyboard.song?.bpm || 100;
@@ -389,11 +473,11 @@ export class VideoRenderer {
   }
 
   /** Karaoke lyrics: syllables light up as they are sung, with a bouncing ball. */
-  drawLyrics(scene, t, W, H) {
+  drawLyrics(scene, t, W, H, { y: centerY = H * 0.56, scale = 1 } = {}) {
     const { ctx } = this;
     const m = Math.min(W, H);
     const syl = this.syllableTimes(scene);
-    const size = m * (H > W ? 0.07 : 0.082);
+    const size = m * (H > W ? 0.07 : 0.082) * scale;
     const maxW = W * 0.84;
     ctx.save();
     ctx.font = `800 ${size}px ${this.font}`;
@@ -415,7 +499,7 @@ export class VideoRenderer {
     }
     const lh = size * 1.35;
     const blockH = lines.length * lh;
-    const top = H * 0.56 - blockH / 2;
+    const top = centerY - blockH / 2;
 
     // emoji bounces on the beat
     const beat = 60 / (this.storyboard.song?.bpm || 100);

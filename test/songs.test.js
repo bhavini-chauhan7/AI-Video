@@ -61,5 +61,6 @@ test("songStoryboard builds a spoken intro, sung lines on the beat, and an outro
   assert.equal(sung[0].duration, 5); // 8 beats at 96 bpm
   const bar = (60 / 96) * 4;
   assert.ok(Math.abs(sb.scenes[0].duration / bar - Math.round(sb.scenes[0].duration / bar)) < 1e-6, "intro is whole bars");
-  assert.deepEqual(sb.cast.map((c) => c.name), ["Narrator", "Singer"]);
+  assert.deepEqual(sb.cast.map((c) => c.name), ["Mr. Moon", "Lily"]);
+  assert.ok(sb.scenes.every((s) => s.visual), "every scene has a 3D description");
 });

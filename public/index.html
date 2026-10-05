@@ -94,6 +94,12 @@
       <label class="check"><input type="checkbox" id="fitVoice" checked> Fit scene length to the voice-over</label>
       <label>Voice volume <input type="range" id="voiceVolume" min="0" max="1.5" step="0.05" value="1"></label>
 
+      <h2>🎬 3D characters</h2>
+      <p class="hint" id="threeHint"></p>
+      <label class="check"><input type="checkbox" id="lipsync" checked> Lip-sync characters to their voices</label>
+      <button type="button" class="primary" id="make3dBtn" disabled>🎬 Make the 3D video</button>
+      <p class="hint" id="threeProgress"></p>
+
       <h2>Music & look</h2>
       <label>Music
         <select id="mood">
@@ -177,6 +183,15 @@
         </div>
       </header>
       <div class="fields">
+        <div class="wide clip-row">
+          <img class="clip-thumb" alt="" hidden>
+          <label>What happens (3D scene) <textarea data-f="visual" rows="2" placeholder="e.g. Lily waves at a twinkling star from her bedroom window"></textarea></label>
+        </div>
+        <div class="wide clip-actions">
+          <span class="clip-status"></span>
+          <button type="button" data-act="make3d" title="Make this scene in 3D">🎬 Make 3D</button>
+          <button type="button" data-act="clear3d" title="Remove the 3D clip">✕</button>
+        </div>
         <label class="wide">Heading <input data-f="heading"></label>
         <label class="wide">Subtext <input data-f="subtext"></label>
         <label class="wide" data-show="bullets">Bullets (one per line) <textarea data-f="bullets" rows="3"></textarea></label>
@@ -219,6 +234,11 @@
         <button type="button" data-act="test" title="Test this voice">▶</button>
         <button type="button" data-act="del" title="Remove character">✕</button>
       </div>
+      <div class="look">
+        <img data-c="image" alt="" hidden>
+        <label>Looks like (for 3D) <textarea data-c="appearance" rows="2" placeholder="e.g. a cute little girl with curly hair and yellow pajamas"></textarea></label>
+      </div>
+      <button type="button" class="ghost small" data-act="design">🎨 Design 3D character</button>
       <label>Character preset <select data-c="preset"></select></label>
       <label>Voice <select data-c="voice"></select></label>
       <div class="row">
