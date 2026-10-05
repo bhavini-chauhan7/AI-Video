@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3D Character Gallery</title>
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.js" } }</script>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; background: #0b0d12; color: #e8ebf3; font: 14px system-ui, sans-serif; }
+    header { padding: 14px 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    a { color: #7cc6fe; }
+    textarea { width: min(600px, 100%); background: #1b2030; color: inherit; border: 1px solid #272d3d; border-radius: 8px; padding: 8px; }
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; padding: 0 20px 20px; }
+    figure { margin: 0; background: #141821; border-radius: 10px; overflow: hidden; }
+    figure img { width: 100%; display: block; }
+    figcaption { padding: 6px 10px; font-size: 12px; color: #8d95a8; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>🧸 3D character gallery</strong>
+    <span>Every character is built from its description. Try your own:</span>
+    <textarea id="desc" rows="2">a little boy with spiky blonde hair, green hoodie and red cap</textarea>
+    <button id="try">Build it</button>
+    <a href="/">← back to the app</a>
+  </header>
+  <div id="grid"></div>
+  <script type="module">
+    import * as THREE from "three";
+    import { buildCharacter } from "/js/three3d/characters.js";
+    import { lookToSpec } from "/js/three3d/parse.js";
+    import { animate } from "/js/three3d/animate.js";
+    import { lightsFor } from "/js/three3d/sets.js";
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    renderer.setSize(440, 440, false);
+    renderer.shadowMap.enabled = true;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    function portrait(description, name, action = "wave", talk = 0.4) {
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color("#dbeafe");
+      scene.add(lightsFor({ night: false }));
+      const floor = new THREE.Mesh(new THREE.CircleGeometry(4, 48), new THREE.MeshStandardMaterial({ color: "#c7d2fe" }));
+      floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+      const spec = lookToSpec(description, { name });
+      const rig = buildCharacter(spec);
+      scene.add(rig.root);
+      animate(rig, 1.1, { action, talk });
+      const cam = new THREE.PerspectiveCamera(32, 1, 0.1, 50);
+      const floating = ["moon", "star", "sun", "cloud"].includes(spec.kind);
+      cam.position.set(0, 1.4, 6); cam.lookAt(0, floating ? 1.5 : 1.1, 0);
+      renderer.render(scene, cam);
+      const fig = document.createElement("figure");
+      fig.innerHTML = `<img src="${renderer.domElement.toDataURL()}" alt=""><figcaption><b>${name}</b> · ${spec.kind}<br>${description}</figcaption>`;
+      return fig;
+    }
+
+    const CAST = [
+      ["Lily", "a sweet little girl with curly brown hair, big brown eyes and yellow pajamas covered in little stars"],
+      ["Mr. Moon", "a friendly smiling moon with rosy cheeks"],
+      ["Twinkle", "a happy golden star"],
+      ["Old MacDonald", "a friendly farmer with a fluffy white beard, a straw hat and blue overalls"],
+      ["Daisy", "a happy brown and white cow with a golden bell"],
+      ["Mary", "a little girl with red pigtails and a blue dress"],
+      ["Woolly", "a fluffy white lamb"],
+      ["Grandma Rose", "a cheerful farmer grandma with round glasses, a straw sunhat and a flowery apron"],
+      ["Teddy", "a jolly teddy bear guard in a red uniform and tall black hat"],
+      ["Leo", "a little boy with a red raincoat and yellow rain boots"],
+      ["Maya", "a little girl in a yellow life jacket with a blue sun hat"],
+      ["Freddy", "a smiling green frog"],
+      ["Robo", "a friendly round white robot with glowing blue eyes"],
+      ["Fuzz", "a fluffy friendly purple monster with one horn"],
+      ["Bun", "a white bunny with a pink bow"],
+      ["Kitty", "an orange cat in a striped shirt"],
+      ["Pip", "a yellow duck"],
+      ["Peppa", "a pink pig in a red dress"],
+      ["Coco", "a brown monkey"],
+      ["Ella", "a grey elephant"],
+      ["Sunny", "a bright smiling sun"],
+      ["Zoe", "a teen girl with long black hair, headphones and a purple hoodie"],
+      ["Sam", "a dad with short brown hair, glasses and a green sweater"],
+      ["Toothy", "a happy white tooth"],
+    ];
+    const grid = document.getElementById("grid");
+    CAST.forEach(([n, d], i) => grid.appendChild(portrait(d, n, ["wave", "idle", "dance", "point", "clap"][i % 5])));
+    document.getElementById("try").onclick = () => grid.prepend(portrait(document.getElementById("desc").value, "Your character"));
+    window.galleryReady = true;
+  </script>
+</body>
+</html>

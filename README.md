@@ -35,9 +35,18 @@ Click **🎵 Song / nursery rhyme**, pick a song, press **Generate**, then **�
 - **ElevenLabs Music (paid, optional):** with `ELEVENLABS_API_KEY` set, choose "ElevenLabs Music" and click **Compose** to get a studio-quality song with real-sounding vocals. Each scene becomes one section of the song, so the lyrics stay in sync. ElevenLabs writes its own arrangement, so a classic rhyme's tune may not match the traditional one exactly.
 - **Your own voice:** you can always record 🎙 yourself singing any line.
 
-## 3D characters
+## 3D cartoon (free, built in)
 
-Turn any video or song into a **3D animated cartoon**: cute characters that talk, sing and move, with **mouths synced to their voices**. This uses [fal.ai](https://fal.ai), one account that gives access to several AI models:
+Every video can be shown as a **3D cartoon**. Characters are built in your browser with Three.js, so there are no AI services, no accounts and no cost. It's on by default for songs and kids' videos; switch it with **🧸 Show scenes as a 3D cartoon**.
+
+- **Characters from words.** Each cast member's **Looks like** text becomes a 3D character: kids, adults and grandparents (hair styles, outfits, patterns such as star pajamas, hats, glasses, beards), plus animals (cat, dog, bunny, bear, cow, sheep, pig, frog, duck, lion, elephant, monkey, fox, mouse, penguin, owl), a moon, star, sun and cloud with faces, robots, monsters and a tooth. Pick a different **3D character** in the cast card if the guess is wrong. Open `/gallery.html` to see them all and try your own descriptions.
+- **Scenes from words.** Each scene's **What happens** text picks the setting (bedroom, night sky, farm, river with a rowboat, town with a bridge, classroom, beach, forest, space or party stage, by day or by night) and the action (wave, dance, jump, clap, point, walk, row, hug, sleep, float). Friends that are mentioned but not in the cast, like "a lamb" or "a twinkling star", appear too. You can override the setting or action per scene.
+- **Lip-sync.** Mouths open and close with the loudness of each character's voice or singing, eyes blink, and characters breathe and sway to the beat.
+- **Smooth export.** Videos are exported frame by frame (WebCodecs: MP4/H.264 where the browser supports it, otherwise WebM), so they're smooth even on a slow computer. A graphics card makes it faster.
+
+## 3D characters with AI video clips (optional, paid)
+
+For a more realistic, movie-like look, you can instead turn scenes into **AI-generated 3D video clips**: cute characters that talk, sing and move, with **mouths synced to their voices**. This uses [fal.ai](https://fal.ai), one account that gives access to several AI models:
 
 | Step | Model | What it does |
 |---|---|---|
@@ -139,7 +148,8 @@ When "fit scene length to voice-over" is on, each scene is stretched or shortene
 | **Voice-over** | multi-character cast, 46 free voices plus ElevenLabs and OpenAI, character effects, mic recording, music ducking under speech |
 | **Captions** | narration shown as subtitles, timed across each scene |
 | **Fonts** | modern, rounded (Baloo 2, also covers Hindi script), bold (Poppins) |
-| **3D characters** | AI-generated 3D cartoon characters that stay consistent across scenes, animated clips, lip-sync to voices and singing (fal.ai) |
+| **3D cartoon (free)** | Three.js characters built from descriptions, 10 settings, actions, blinking and lip-sync to voices and singing; character gallery at `/gallery.html` |
+| **3D characters (paid)** | AI-generated 3D cartoon characters that stay consistent across scenes, animated clips, lip-sync to voices and singing (fal.ai) |
 | **Formats** | 1080p or 720p: landscape (YouTube), vertical (Shorts, Reels, TikTok), square; plus a thumbnail PNG |
 | **Projects** | autosaves in the browser; Save/Open lets you keep the project as a JSON file |
 
@@ -184,11 +194,13 @@ MediaRecorder ─▶ .mp4 / .webm ─ POST /api/convert (optional) ─▶ ffmpeg
 - `lib/fal3d.js`: the 3D character pipeline (design → scene still → animation → lip-sync) and cost estimates.
 - `lib/acestep.js`: the ACE-Step client (cover task, polling, download).
 - `lib/songs.js`: the nursery-rhyme songbook. `public/js/song.js` holds the melody parser, syllable matching and auto-harmonizer, and is shared by the server and the browser.
+- `public/js/three3d/`: the free 3D cartoon. `characters.js` builds characters, `sets.js` builds settings, `parse.js` turns descriptions into specs, `animate.js` poses characters at time `t`, and `stage.js` renders a scene.
+- `public/js/exporter.js`: the frame-by-frame WebCodecs exporter.
 - `public/js/renderer.js`: draws any frame at time `t`. Preview, seeking and export all go through the same code path.
 - `public/js/audio.js`: the procedural music engine (pads, bass, arpeggios, drums, reverb), uploaded-track playback, and the voice-over bus with music ducking.
 - `public/js/app.js`: the UI, playback, editing and export.
 
-Export records in real time, so a 30-second video takes about 30 seconds to export. Keep the tab visible while it records, because browsers throttle hidden tabs. Kokoro generates speech on the CPU at roughly real time, so voicing a 30-second video takes about 30–60 seconds. Results are cached, so regenerating unchanged scenes is instant.
+Export renders frame by frame with WebCodecs, so it's smooth on any computer. Browsers without WebCodecs fall back to real-time recording. Kokoro generates speech on the CPU at roughly real time, so voicing a 30-second video takes about 30–60 seconds. Results are cached, so regenerating unchanged scenes is instant.
 
 ## Development
 

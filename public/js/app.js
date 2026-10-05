@@ -1,6 +1,10 @@
 import { VideoRenderer } from "./renderer.js";
 import { Soundtrack, encodeWav } from "./audio.js";
 import { buildNotes, totalBeats } from "./song.js";
+import { sceneCast as sharedSceneCast } from "./cast.js";
+import { lookToSpec } from "./three3d/parse.js";
+import { portrait } from "./three3d/portrait.js";
+import { exportFrames, frameExportSupported, SAMPLE_RATE } from "./exporter.js";
 
 const OPTIONS = {
   layout: ["title", "bullets", "quote", "statistic", "closing", "lyrics"],
@@ -20,6 +24,10 @@ const EXAMPLES = [
   ["A 30-second promo for a neighborhood coffee shop", "general"],
 ];
 const STORAGE_KEY = "ai-video-project-v1";
+const KINDS3D = ["girl", "boy", "baby", "woman", "man", "grandma", "grandpa", "cat", "dog", "bunny", "bear", "cow", "sheep", "pig", "frog", "duck",
+  "lion", "elephant", "monkey", "fox", "mouse", "penguin", "owl", "moon", "star", "sun", "cloud", "robot", "monster", "tooth"];
+const SETS3D = ["bedroom", "night", "space", "farm", "river", "town", "classroom", "beach", "forest", "stage"];
+const ACTIONS3D = ["idle", "wave", "dance", "jump", "clap", "point", "walk", "row", "hug", "sleep", "float"];
 const VOICE_LEAD = 0.35; // seconds between scene start and its voice-over
 const FONT_LOADS = { rounded: '800 40px "Baloo 2"', bold: '800 40px "Poppins"' };
 
@@ -66,7 +74,7 @@ function defaultCast() {
 }
 
 function blankStoryboard() {
-  return { title: "Untitled video", mood: "calm", aspectRatio: $("aspect").value, audience, font: "modern", language: "en-us", cast: defaultCast(), scenes: [] };
+  return { title: "Untitled video", mood: "calm", aspectRatio: $("aspect").value, audience, font: "modern", language: "en-us", look: "3d", cast: defaultCast(), scenes: [] };
 }
 
 function sanitize(sb) {
@@ -75,7 +83,7 @@ function sanitize(sb) {
   const cast = (Array.isArray(sb.cast) && sb.cast.length ? sb.cast : defaultCast()).map((c) => ({
     name: String(c.name || "Narrator"), description: String(c.description || ""), voiceStyle: String(c.voiceStyle || ""),
     voice: String(c.voice || ""), effect: String(c.effect || "none"), speed: Math.min(1.6, Math.max(0.6, Number(c.speed) || 1)),
-    appearance: String(c.appearance || ""), ...(/^\/media\/[\w-]+\.(png|jpe?g|webp)$/i.test(c.image || "") ? { image: c.image } : {}),
+    appearance: String(c.appearance || ""), ...(KINDS3D.includes(c.kind3d) ? { kind3d: c.kind3d } : {}), ...(/^\/media\/[\w-]+\.(png|jpe?g|webp)$/i.test(c.image || "") ? { image: c.image } : {}),
   }));
   return {
     title: String(sb.title || "Untitled video"),
@@ -84,6 +92,7 @@ function sanitize(sb) {
     audience: String(sb.audience || "general"),
     language: String(sb.language || "en-us"),
     font: ["modern", "rounded", "bold"].includes(sb.font) ? sb.font : "modern",
+    look: sb.look === "3d" ? "3d" : "flat",
     ...(sb.song ? { song: sanitizeSong(sb.song) } : {}),
     cast,
     scenes: sb.scenes.map((s) => {
@@ -93,6 +102,8 @@ function sanitize(sb) {
       scene.colors = Array.isArray(scene.colors) && scene.colors.length >= 2 ? scene.colors.slice(0, 2) : base.colors;
       scene.duration = Math.min(30, Math.max(1, Number(scene.duration) || 5));
       for (const k of ["heading", "subtext", "narration", "emoji", "accent", "speaker", "lyrics", "melody", "visual"]) scene[k] = String(scene[k] ?? "");
+      if (!SETS3D.includes(scene.set3d)) scene.set3d = "";
+      if (!ACTIONS3D.includes(scene.action3d)) scene.action3d = "";
       if (!(scene.clip && /^\/media\/[\w-]+\.mp4$/.test(scene.clip.clip || ""))) delete scene.clip;
       if (!cast.some((c) => c.name === scene.speaker)) scene.speaker = cast[0].name;
       const vo = scene.voiceover;
@@ -262,7 +273,7 @@ async function composeTrack() {
     const track = { id: uid(), audio: await blobToDataURL(blob), duration: buffer.duration, key };
     buffers.set(track.id, buffer);
     storyboard.song.track = track;
-    save(); updateSceneHeaders(); updateSongPanel();
+    save(); updateSceneHeaders(); updateSongPanel(); updateMouths();
     play();
   } catch (err) {
     showNotice(err.message, "error");
@@ -322,11 +333,13 @@ function setStoryboard(sb, { keepTime = false } = {}) {
   if (!keepTime) player.t = 0;
   player.t = Math.min(player.t, totalDuration());
   loadFont(sb.font);
+  $("look3d").checked = sb.look === "3d";
   renderCast();
   renderScenes();
   updateSongPanel();
   refresh();
   save();
+  updateMouths();
 }
 
 /** Re-sync renderer after an edit without rebuilding the editor. */
@@ -386,6 +399,7 @@ async function setVoiceover(i, blob, source) {
   const vo = { id: uid(), audio: await blobToDataURL(blob), duration: Math.round(buffer.duration * 100) / 100, key: source === "tts" || source === "sing" ? voKey(scene) : "", source };
   buffers.set(vo.id, buffer);
   scene.voiceover = vo;
+  queueMicrotask(updateMouths);
   if ($("fitVoice").checked && !isSung(scene)) {
     scene.duration = Math.min(30, Math.max(2.5, Math.round((vo.duration + VOICE_LEAD + 0.6) * 10) / 10));
     if (storyboard.song) fitSongDurations(); // snap to whole bars
@@ -518,6 +532,56 @@ async function toggleRecord(i, btn) {
   setTimeout(() => recording?.recorder === recorder && recorder.stop(), 60000);
 }
 
+// ---------- lip-sync for the 3D cartoon ----------
+// Mouth openness follows the loudness of each scene's voice (or the sung track).
+const envCache = new WeakMap();
+function envelope(buffer, from = 0, length = buffer.duration) {
+  const key = `${from}|${length}`;
+  let per = envCache.get(buffer);
+  if (!per) envCache.set(buffer, (per = new Map()));
+  if (per.has(key)) return per.get(key);
+  const sr = buffer.sampleRate, hop = Math.round(sr / 100), a = Math.floor(from * sr), n = Math.floor(length * 100);
+  const ch = buffer.getChannelData(0);
+  const raw = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    const s0 = a + i * hop;
+    for (let k = 0; k < hop && s0 + k < ch.length; k++) sum += ch[s0 + k] * ch[s0 + k];
+    raw[i] = Math.sqrt(sum / hop);
+  }
+  const sorted = Float32Array.from(raw).sort();
+  const ref = sorted[Math.floor(sorted.length * 0.9)] || 1;
+  const env = new Float32Array(n);
+  let v = 0;
+  for (let i = 0; i < n; i++) {
+    const target = Math.min(1, Math.pow(raw[i] / ref, 0.8));
+    v += (target - v) * (target > v ? 0.6 : 0.25); // fast open, softer close
+    env[i] = v < 0.08 ? 0 : v;
+  }
+  per.set(key, env);
+  return env;
+}
+
+let mouths = [];
+async function updateMouths() {
+  if (!storyboard) return;
+  await ensureBuffers();
+  const track = trackFresh() && buffers.get(storyboard.song.track.id);
+  mouths = storyboard.scenes.map((sc, i) => {
+    const b = sc.voiceover && buffers.get(sc.voiceover.id);
+    if (isSung(sc) && track) return { env: envelope(track, sceneStart(i), sc.duration), at: 0 };
+    if (b) return { env: envelope(b), at: isSung(sc) ? 0 : VOICE_LEAD };
+    return null;
+  });
+  if (!player.playing) refresh();
+}
+renderer.mouth = (i, t) => {
+  const m = mouths[i];
+  if (!m) return 0;
+  const k = Math.floor((t - m.at) * 100);
+  return k >= 0 && k < m.env.length ? m.env[k] : 0;
+};
+
 // ---------- 3D characters (fal.ai) ----------
 const busy3d = new Map(); // scene index -> step text
 
@@ -551,26 +615,7 @@ async function designCharacter(member, onStep) {
   save(); renderCast();
 }
 
-const STOP = new Set(["the", "mr", "mrs", "ms", "miss", "little", "big", "old", "and", "character", "narrator", "singer"]);
-/** Does the scene text mention this character (any distinctive word of its name, e.g. "moon" for "Mr. Moon")? */
-function mentions(text, c) {
-  const words = c.name.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP.has(w));
-  return words.length ? words.some((w) => new RegExp(`\\b${w}`, "iu").test(text)) : text.toLowerCase().includes(c.name.toLowerCase());
-}
-
-/**
- * Characters in a scene, main one first: the character(s) the description is
- * about, then the speaker (whose mouth moves) if not already included.
- */
-function sceneCast(scene) {
-  const speaker = castFor(scene);
-  const text = `${scene.visual} ${scene.heading}`;
-  const named = storyboard.cast.filter((c) => mentions(text, c));
-  // order by where they appear in the description
-  named.sort((a, b) => text.toLowerCase().search(a.name.toLowerCase().split(" ").pop()) - text.toLowerCase().search(b.name.toLowerCase().split(" ").pop()));
-  if (!named.length) return [speaker];
-  return named.includes(speaker) ? [speaker, ...named.filter((c) => c !== speaker)] : [...named, speaker];
-}
+const sceneCast = (scene) => sharedSceneCast(storyboard, scene);
 
 const clipKey = (scene) => JSON.stringify([scene.visual, scene.heading, storyboard.aspectRatio, $("lipsync").checked && sceneHasVoice(scene) ? voiceKeyFor(scene) : "",
   sceneCast(scene).map((c) => [c.name, c.image, c.appearance])]);
@@ -716,8 +761,20 @@ function renderCast() {
     q("effect").value = member.effect;
     q("speed").value = member.speed;
     q("appearance").value = member.appearance || "";
-    if (member.image) { q("image").src = member.image; q("image").hidden = false; }
-    q("appearance").addEventListener("change", () => { member.appearance = q("appearance").value.trim(); save(); updateSceneHeaders(); });
+    q("kind3d").innerHTML = `<option value="">Auto (from “Looks like”)</option>` + KINDS3D.map((k) => `<option value="${k}">${k}</option>`).join("");
+    q("kind3d").value = member.kind3d || "";
+    const showPortrait = () => {
+      if (member.image) { q("image").src = member.image; q("image").hidden = false; q("image").classList.remove("portrait"); return; }
+      try {
+        const spec = lookToSpec(member.appearance || "", { name: member.name, voiceStyle: member.voiceStyle });
+        if (member.kind3d) spec.kind = member.kind3d;
+        q("image").src = portrait(spec); q("image").hidden = false; q("image").classList.add("portrait");
+        q("image").title = `3D ${spec.kind}`;
+      } catch { q("image").hidden = true; }
+    };
+    showPortrait();
+    q("appearance").addEventListener("change", () => { member.appearance = q("appearance").value.trim(); showPortrait(); save(); changed(); });
+    q("kind3d").addEventListener("change", () => { member.kind3d = q("kind3d").value || undefined; showPortrait(); save(); changed(); });
     const designBtn = el.querySelector("[data-act=design]");
     designBtn.hidden = !serverStatus.fal;
     designBtn.textContent = member.image ? "🎨 Redesign 3D character" : "🎨 Design 3D character";
@@ -835,6 +892,8 @@ function renderScenes() {
     el.querySelector(".speaker-label").textContent = sung ? "Singer" : "Speaker";
     el.querySelector("[data-f=duration]").disabled = sung;
     if (sung) el.querySelector("[data-f=duration]").title = "Set by the melody and tempo";
+    el.querySelector("[data-f=set3d]").innerHTML = `<option value="">Auto</option>` + SETS3D.map((k) => `<option value="${k}">${k}</option>`).join("");
+    el.querySelector("[data-f=action3d]").innerHTML = `<option value="">Auto</option>` + ACTIONS3D.map((k) => `<option value="${k}">${k}</option>`).join("");
     el.querySelector("[data-f=speaker]").innerHTML = storyboard.cast.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join("");
     el.querySelectorAll("[data-f]").forEach((input) => {
       const f = input.dataset.f;
@@ -1049,10 +1108,15 @@ async function exportVideo() {
   const btn = $("exportBtn"), bar = $("progressBar");
   btn.disabled = true; $("generateBtn").disabled = true;
   $("progress").hidden = false; bar.style.width = "0";
-  $("exportMsg").textContent = "Rendering… keep this tab visible until it finishes.";
+  $("exportMsg").textContent = "Preparing…";
   try {
     await ensureBuffers();
     await document.fonts?.ready;
+    if (frameExportSupported()) {
+      const result = await exportFrameByFrame(bar);
+      if (result) return finishExport(result.blob, result.ext);
+    }
+    $("exportMsg").textContent = "Recording in real time… keep this tab visible until it finishes.";
     const fps = +$("fps").value;
     const d = totalDuration();
     const ac = soundtrack.ensureContext();
@@ -1089,12 +1153,7 @@ async function exportVideo() {
     stream.getTracks().forEach((t) => t.stop());
 
     const type = (mimeType || "video/webm").split(";")[0];
-    const blob = new Blob(chunks, { type });
-    const ext = type === "video/mp4" ? "mp4" : "webm";
-    const name = `${fileBase()}.${ext}`;
-    addDownload(blob, name);
-    if (ext === "webm" && serverStatus.mp4) addConvertButton(blob, name.replace(/\.webm$/, ".mp4"));
-    $("exportMsg").textContent = `Done: ${(blob.size / 1e6).toFixed(1)} MB ${ext.toUpperCase()}${ext === "webm" ? " (YouTube accepts WebM; convert to MP4 for other apps)" : ""}.`;
+    finishExport(new Blob(chunks, { type }), type === "video/mp4" ? "mp4" : "webm");
   } catch (err) {
     $("exportMsg").textContent = `Export failed: ${err.message}`;
   } finally {
@@ -1103,6 +1162,40 @@ async function exportVideo() {
     refresh();
     btn.disabled = false; $("generateBtn").disabled = false;
     setTimeout(() => ($("progress").hidden = true), 800);
+  }
+}
+
+function finishExport(blob, ext) {
+  const name = `${fileBase()}.${ext}`;
+  addDownload(blob, name);
+  if (ext === "webm" && serverStatus.mp4) addConvertButton(blob, name.replace(/\.webm$/, ".mp4"));
+  $("exportMsg").textContent = `Done: ${(blob.size / 1e6).toFixed(1)} MB ${ext.toUpperCase()}${ext === "webm" ? " (YouTube accepts WebM; convert to MP4 for other apps)" : ""}.`;
+}
+
+/** Smooth export: mix the audio offline, then draw and encode every frame at its exact time. */
+async function exportFrameByFrame(bar) {
+  const d = totalDuration();
+  $("exportMsg").textContent = "Mixing the sound…";
+  const audio = await soundtrack.renderOffline({
+    mood: $("mood").value, duration: d, offset: 0, volume: +$("volume").value,
+    voices: voiceClips(), voiceVolume: +$("voiceVolume").value, ...musicSource(),
+  }, SAMPLE_RATE);
+  const started = Date.now();
+  renderer.exactFrames = true;
+  renderer.playing = false;
+  try {
+    return await exportFrames({
+      canvas, duration: d, fps: +$("fps").value, bitrate: +$("bitrate").value * (canvas.width > 1280 ? 1.8 : 1), audio,
+      drawAt: async (t) => { await renderer.prepareFrame(t); player.t = t; renderer.drawFrame(t); },
+      onProgress: (p) => {
+        bar.style.width = `${(p * 100).toFixed(1)}%`;
+        const elapsed = (Date.now() - started) / 1000, left = p > 0.02 ? elapsed / p - elapsed : 0;
+        $("exportMsg").textContent = `Rendering frame by frame… ${Math.round(p * 100)}%${left > 2 ? ` · about ${Math.ceil(left)} s left` : ""}`;
+        $("time").textContent = `${fmt(p * d)} / ${fmt(d)}`;
+      },
+    });
+  } finally {
+    renderer.exactFrames = false;
   }
 }
 
@@ -1180,6 +1273,7 @@ $("transpose").addEventListener("change", restartIfPlaying);
 $("songEngine").addEventListener("change", (e) => { storyboard.song.engine = e.target.value; updateSongPanel(); changed(); restartIfPlaying(); });
 $("songTrackBtn").addEventListener("click", composeTrack);
 $("make3dBtn").addEventListener("click", makeAll3d);
+$("look3d").addEventListener("change", (e) => { if (storyboard) { storyboard.look = e.target.checked ? "3d" : "flat"; changed(); } });
 $("lipsync").addEventListener("change", () => storyboard && updateSceneHeaders());
 $("strength").addEventListener("change", (e) => { storyboard.song.coverStrength = +e.target.value; updateSongPanel(); updateSceneHeaders(); save(); });
 $("examples").append(...EXAMPLES.map(([ex, a, type = "talk"]) => {

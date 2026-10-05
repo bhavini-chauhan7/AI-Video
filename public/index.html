@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&family=Poppins:wght@500;600;700;800;900&display=swap">
   <link rel="stylesheet" href="styles.css">
+  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.js" } }</script>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
 </head>
 <body>
@@ -94,11 +95,17 @@
       <label class="check"><input type="checkbox" id="fitVoice" checked> Fit scene length to the voice-over</label>
       <label>Voice volume <input type="range" id="voiceVolume" min="0" max="1.5" step="0.05" value="1"></label>
 
-      <h2>🎬 3D characters</h2>
-      <p class="hint" id="threeHint"></p>
-      <label class="check"><input type="checkbox" id="lipsync" checked> Lip-sync characters to their voices</label>
-      <button type="button" class="primary" id="make3dBtn" disabled>🎬 Make the 3D video</button>
-      <p class="hint" id="threeProgress"></p>
+      <h2>🧸 3D cartoon</h2>
+      <label class="check"><input type="checkbox" id="look3d"> Show scenes as a 3D cartoon <span class="hint">(free)</span></label>
+      <p class="hint">Characters are built from their “Looks like” description, act out each scene’s “What happens”, and their mouths follow the voices. <a href="/gallery.html" target="_blank">See all characters</a></p>
+
+      <details class="ai-clips">
+        <summary>Optional: AI video clips (paid, fal.ai)</summary>
+        <p class="hint" id="threeHint"></p>
+        <label class="check"><input type="checkbox" id="lipsync" checked> Lip-sync characters to their voices</label>
+        <button type="button" class="ghost small" id="make3dBtn" disabled>🎬 Make AI video clips</button>
+        <p class="hint" id="threeProgress"></p>
+      </details>
 
       <h2>Music & look</h2>
       <label>Music
@@ -156,7 +163,7 @@
           <button class="ghost" id="thumbBtn" disabled title="1280×720 PNG of the title scene for YouTube">🖼 Thumbnail</button>
         </div>
         <div class="progress" id="progress" hidden><div id="progressBar"></div></div>
-        <p class="hint" id="exportMsg">Export records the video in real time; keep this tab visible while it renders.</p>
+        <p class="hint" id="exportMsg">Export draws every frame, so the video is smooth on any computer. Keep this tab open while it renders.</p>
         <div id="downloads"></div>
       </div>
     </section>
@@ -187,6 +194,8 @@
           <img class="clip-thumb" alt="" hidden>
           <label>What happens (3D scene) <textarea data-f="visual" rows="2" placeholder="e.g. Lily waves at a twinkling star from her bedroom window"></textarea></label>
         </div>
+        <label>3D setting <select data-f="set3d"></select></label>
+        <label>3D action <select data-f="action3d"></select></label>
         <div class="wide clip-actions">
           <span class="clip-status"></span>
           <button type="button" data-act="make3d" title="Make this scene in 3D">🎬 Make 3D</button>
@@ -238,7 +247,8 @@
         <img data-c="image" alt="" hidden>
         <label>Looks like (for 3D) <textarea data-c="appearance" rows="2" placeholder="e.g. a cute little girl with curly hair and yellow pajamas"></textarea></label>
       </div>
-      <button type="button" class="ghost small" data-act="design">🎨 Design 3D character</button>
+      <label>3D character <select data-c="kind3d"></select></label>
+      <button type="button" class="ghost small" data-act="design">🎨 Design with AI (paid)</button>
       <label>Character preset <select data-c="preset"></select></label>
       <label>Voice <select data-c="voice"></select></label>
       <div class="row">

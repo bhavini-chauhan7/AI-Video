@@ -1,4 +1,7 @@
 import { buildNotes } from "./song.js";
+import { Stage } from "./three3d/stage.js";
+import { lookToSpec, sceneToPlan } from "./three3d/parse.js";
+import { sceneCast } from "./cast.js";
 
 // Canvas renderer: turns a storyboard into frames. Pure function of time,
 // so preview, seeking and export all draw the exact same thing.
@@ -57,6 +60,8 @@ export class VideoRenderer {
     this.images = new Map();
     this.options = { captions: true, resolution: "720p" };
     this.videos = new Map(); // clip url -> <video>
+    this.stage = null;        // 3D cartoon renderer, created on first use
+    this.mouth = () => 0;     // (sceneIndex, t) -> 0..1, set by the app from the voices
     this.playing = false;     // true while previewing/exporting, so clips play instead of seeking
     this.font = BASE_FONT;
     this.onImageLoad = null;
@@ -70,6 +75,7 @@ export class VideoRenderer {
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
     let start = 0;
     for (const sc of storyboard.scenes) if (sc.clip?.clip) this.video(sc.clip.clip);
+    this.plan3d(storyboard);
     this.timeline = storyboard.scenes.map((scene, index) => {
       const entry = { scene, index, start, end: start + scene.duration };
       start += scene.duration;
@@ -84,6 +90,44 @@ export class VideoRenderer {
     this.duration = start;
   }
 
+  /** Is this scene drawn as a 3D cartoon? (AI clips and uploaded photos win.) */
+  is3d(scene) {
+    return this.storyboard?.look === "3d" && !scene.clip?.clip && !(scene.background === "image" && scene.image);
+  }
+
+  /** Work out each scene's 3D setting, characters and action once per edit. */
+  plan3d(sb) {
+    this.desc3d = [];
+    if (sb.look !== "3d") return;
+    const specOf = (c) => {
+      const spec = lookToSpec(c.appearance || "", { name: c.name, voiceStyle: c.voiceStyle });
+      if (c.kind3d) spec.kind = c.kind3d;
+      return spec;
+    };
+    const keys = new Set();
+    sb.scenes.forEach((scene, i) => {
+      const cast = sceneCast(sb, scene).slice(0, 3);
+      const speaker = cast.find((c) => c.name === scene.speaker) || cast[0];
+      const specs = cast.map((c) => ({ spec: specOf(c), speaking: c === speaker, name: c.name }));
+      const text = scene.visual || scene.heading || "";
+      const plan = sceneToPlan(text, { layout: scene.layout, castKinds: specs.map((x) => x.spec.kind) });
+      if (scene.set3d) plan.set = scene.set3d;
+      if (scene.action3d) plan.action = scene.action3d;
+      const props = plan.props.slice(0, Math.max(0, 4 - specs.length)).map((kind) => ({
+        spec: lookToSpec(kind === "sheep" ? "a fluffy white lamb" : `a cute ${kind}`, { name: `${kind}-${i}` }), speaking: false, name: kind, small: !["moon", "star", "sun", "cloud"].includes(kind),
+      }));
+      const desc = {
+        set: plan.set, night: plan.night, boat: plan.boat, action: plan.action, characters: [...specs, ...props],
+        sung: !!(scene.lyrics && scene.melody && sb.song), bpm: sb.song?.bpm || 100, duration: scene.duration,
+        groupActs: ["dance", "jump", "clap", "wave"].includes(plan.action),
+      };
+      const key = JSON.stringify(desc);
+      keys.add(key);
+      this.desc3d[i] = { desc, key };
+    });
+    this.stage?.keepOnly(keys);
+  }
+
   video(url) {
     if (!this.videos.has(url)) {
       const v = document.createElement("video");
@@ -95,8 +139,29 @@ export class VideoRenderer {
     return this.videos.get(url);
   }
 
+  /** Before drawing time t frame-exactly: seek the clips it shows and wait for them. */
+  async prepareFrame(t) {
+    if (!this.timeline?.length) return;
+    t = clamp(t, 0, Math.max(0, this.duration - 1e-3));
+    const cur = this.sceneAt(t), prev = this.timeline[cur.index - 1];
+    const waits = [];
+    for (const [entry, local] of [[cur, t - cur.start], [prev, prev ? prev.scene.duration + (t - cur.start) : 0]]) {
+      const url = entry?.scene.clip?.clip;
+      if (!url || (entry === prev && t - cur.start >= 0.7)) continue;
+      const v = this.video(url);
+      if (!v.paused) v.pause();
+      const target = Math.max(0, Math.min(local, (v.duration || 0) - 0.04));
+      if (Math.abs(v.currentTime - target) > 0.001) {
+        waits.push(new Promise((r) => { const done = () => r(); v.addEventListener("seeked", done, { once: true }); setTimeout(done, 1500); }));
+        v.currentTime = target;
+      }
+    }
+    await Promise.all(waits);
+  }
+
   /** Keep a clip's playhead at scene time t (play along while previewing, seek while scrubbing). */
   syncVideo(v, t) {
+    if (this.exactFrames) { this.usedVideos.add(v); return; }
     const target = Math.max(0, Math.min(t, (v.duration || 0) - 0.04));
     if (this.playing && t < (v.duration || 0)) {
       if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = target;
@@ -171,7 +236,7 @@ export class VideoRenderer {
     ctx.save();
     ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip();
     this.drawBackground(scene, t, W, H, index);
-    if (scene.clip?.clip) {
+    if (scene.clip?.clip || this.is3d(scene)) {
       this.drawClipOverlay(scene, t, W, H);
     } else {
       const vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
@@ -196,6 +261,19 @@ export class VideoRenderer {
     const rand = mulberry32(index * 977 + 13);
     const m = Math.min(W, H);
 
+    if (this.is3d(scene) && this.desc3d[index]) {
+      try {
+        this.stage ??= new Stage();
+        this.stage.setSize(W, H);
+        const { desc, key } = this.desc3d[index];
+        const canvas = this.stage.render(key, desc, t, (c) => (c.speaking ? this.mouth(index, t) : 0));
+        ctx.drawImage(canvas, 0, 0, W, H);
+        return;
+      } catch (err) {
+        console.error("3D rendering failed, showing the flat version:", err);
+        this.storyboard.look = "flat";
+      }
+    }
     if (scene.clip?.clip) {
       const v = this.video(scene.clip.clip);
       this.syncVideo(v, t);
